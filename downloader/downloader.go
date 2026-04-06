@@ -58,7 +58,8 @@ func (d *Downloader) Download(urlStr string) (bool, error) {
 		if lastErr == nil {
 			return completed, nil
 		}
-		fmt.Printf("  attempt %d failed: %v — retrying...\n", attempt, lastErr)
+		fmt.Printf("  attempt %d failed: %v\n", attempt, lastErr)
+		fmt.Println("retrying...")
 		time.Sleep(time.Duration(attempt) * 2 * time.Second) // backoff: 2s, 4s, ...
 	}
 	return false, lastErr
@@ -69,30 +70,43 @@ func (d *Downloader) doDownload(urlStr string) (bool, error) {
 		return false, err
 	}
 
-	// HEAD to check size + range support
-	head, err := d.newRequest("HEAD", urlStr)
+	// Try HEAD first
+	req, err := d.newRequest("HEAD", urlStr)
 	if err != nil {
 		return false, err
 	}
-	headResp, err := d.Client.Do(head)
-	if err == nil {
-		defer headResp.Body.Close()
+	resp, err := d.Client.Do(req)
+
+	// If HEAD fails or returns 405/403 (Method Not Allowed), try GET
+	if err != nil || (resp != nil && resp.StatusCode >= 400) {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		// Fallback: Try a GET request but close the body immediately
+		// just to get the headers/metadata.
+		req, _ = d.newRequest("GET", urlStr)
+		resp, err = d.Client.Do(req)
+		if err != nil {
+			return false, fmt.Errorf("metadata fetch failed (HEAD and GET both failed): %w", err)
+		}
+	}
+	defer resp.Body.Close()
+
+	// check if resp is nil before using it
+	if resp == nil {
+		return false, fmt.Errorf("received nil response from server")
 	}
 
-	supportsRanges := err == nil &&
-		headResp.Header.Get("Accept-Ranges") == "bytes" &&
-		headResp.ContentLength > 0
+	finalURL := resp.Request.URL.String()
+	fileName := resolveFilename(resp, finalURL)
+	totalSize := resp.ContentLength
 
-	var fileName string
-	if err == nil {
-		finalURL := headResp.Request.URL.String()
-		fileName = resolveFilename(headResp, finalURL)
-	}
+	supportsRanges := resp.Header.Get("Accept-Ranges") == "bytes" && totalSize > 0
 
 	if supportsRanges {
-		return d.chunkedDownload(urlStr, fileName, headResp.ContentLength)
+		return d.chunkedDownload(urlStr, fileName, totalSize)
 	}
-	return d.streamDownload(urlStr)
+	return d.streamDownload(urlStr, fileName, totalSize)
 }
 
 // chunkedDownload splits the file into numChunks parallel range requests
@@ -101,14 +115,19 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 	output := filepath.Join(d.OutputDir, fileName)
 
 	// Check if file already exists and is complete
-	if info, err := os.Stat(output); err == nil {
+	info, err := os.Stat(output)
+	if err == nil {
 		if info.Size() == totalSize {
 			fmt.Printf("✓ file already complete: %s\n", fileName)
 			return false, nil // skipped
 		}
 	}
 
-	bar := ui.NewBar(totalSize, fileName)
+	var currentSize int64
+	if info != nil {
+		currentSize = info.Size()
+	}
+	bar := ui.NewBarWithOffset(totalSize, fileName, currentSize)
 
 	chunkSize := totalSize / numChunks
 	type result struct {
@@ -143,10 +162,6 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 
 	for res := range results {
 		if res.err != nil {
-			// cleanup temp files on error
-			for _, f := range tmpFiles {
-				_ = os.Remove(f)
-			}
 			return false, fmt.Errorf("chunk %d failed: %w", res.index, res.err)
 		}
 	}
@@ -160,6 +175,7 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 	return true, nil // actually completed
 }
 
+// download a single chunk
 func (d *Downloader) downloadChunk(
 	urlStr string,
 	start, end int64,
@@ -231,29 +247,15 @@ func (d *Downloader) downloadChunk(
 }
 
 // streamDownload is the fallback single-stream path
-func (d *Downloader) streamDownload(urlStr string) (bool, error) {
+func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (bool, error) {
 	fmt.Println("method streamDownload")
 
-	// First, do a HEAD to get content length
-	headReq, err := d.newRequest("HEAD", urlStr)
-	if err != nil {
-		return false, err
-	}
-	headResp, err := d.Client.Do(headReq)
-	if err != nil {
-		return false, fmt.Errorf("HEAD failed: %w", err)
-	}
-	headResp.Body.Close()
-
-	finalURL := headResp.Request.URL.String()
-	fileName := resolveFilename(headResp, finalURL)
 	output := filepath.Join(d.OutputDir, fileName)
-	contentLength := headResp.ContentLength
 
 	// Check for existing partial download
 	existingSize := int64(0)
 	if info, err := os.Stat(output); err == nil {
-		if info.Size() == contentLength {
+		if info.Size() == totalSize {
 			fmt.Printf("✓ file already complete: %s\n", fileName)
 			return false, nil // skipped
 		}
@@ -294,7 +296,7 @@ func (d *Downloader) streamDownload(urlStr string) (bool, error) {
 	}
 	defer f.Close()
 
-	bar := ui.NewBarWithOffset(contentLength, fileName, existingSize)
+	bar := ui.NewBarWithOffset(totalSize, fileName, existingSize)
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := resp.Body.Read(buf)
@@ -316,185 +318,17 @@ func (d *Downloader) streamDownload(urlStr string) (bool, error) {
 	return true, nil
 }
 
-// func (d *Downloader) Download(urlStr string) error {
-// 	var lastErr error
-// 	for attempt := 1; attempt <= maxRetries; attempt++ {
-// 		lastErr = d.doDownload(urlStr)
-// 		if lastErr == nil {
-// 			return nil
-// 		}
-// 		fmt.Printf("  attempt %d failed: %v — retrying...\n", attempt, lastErr)
-// 		time.Sleep(time.Duration(attempt) * 2 * time.Second) // backoff: 2s, 4s
-// 	}
-// 	return lastErr
-// }
-//
-// func (d *Downloader) doDownload(urlStr string) error {
-// 	if err := os.MkdirAll(d.OutputDir, 0o755); err != nil {
-// 		return err
-// 	}
-//
-// 	// HEAD to check size + range support
-// 	head, err := d.newRequest("HEAD", urlStr)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	headResp, err := d.Client.Do(head)
-// 	if err == nil {
-// 		headResp.Body.Close()
-// 	}
-//
-// 	supportsRanges := err == nil &&
-// 		headResp.Header.Get("Accept-Ranges") == "bytes" &&
-// 		headResp.ContentLength > 0
-//
-// 	// resolve filename from HEAD response (or fall back to GET later)
-// 	var fileName string
-// 	if err == nil {
-// 		finalURL := headResp.Request.URL.String()
-// 		fileName = resolveFilename(headResp, finalURL)
-// 	}
-//
-// 	if supportsRanges {
-// 		return d.chunkedDownload(urlStr, fileName, headResp.ContentLength)
-// 	}
-// 	return d.streamDownload(urlStr)
-// }
-//
-// // chunkedDownload splits the file into numChunks parallel range requests
-// func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) error {
-// 	fmt.Println("method chunkedDownload")
-// 	output := filepath.Join(d.OutputDir, fileName)
-//
-// 	// skip if already complete
-// 	if info, err := os.Stat(output); err == nil && info.Size() == totalSize {
-// 		fmt.Printf("  %s already complete, skipping\n", fileName)
-// 		return nil
-// 	}
-//
-// 	chunkSize := totalSize / numChunks
-// 	tmpFiles := make([]string, numChunks)
-// 	for i := range numChunks {
-// 		tmpFiles[i] = fmt.Sprintf("%s.part%d", output, i)
-// 	}
-//
-// 	// calculate already-downloaded bytes across all chunks
-// 	var alreadyDownloaded int64
-// 	for _, tmp := range tmpFiles {
-// 		if info, err := os.Stat(tmp); err == nil {
-// 			alreadyDownloaded += info.Size()
-// 		}
-// 	}
-//
-// 	bar := ui.NewBarWithOffset(totalSize, fileName, alreadyDownloaded)
-//
-// 	type result struct {
-// 		index int
-// 		err   error
-// 	}
-// 	results := make(chan result, numChunks)
-// 	var wg sync.WaitGroup
-//
-// 	for i := range numChunks {
-// 		expectedStart := int64(i) * chunkSize
-// 		expectedEnd := expectedStart + chunkSize - 1
-// 		if i == numChunks-1 {
-// 			expectedEnd = totalSize - 1
-// 		}
-// 		expectedChunkSize := expectedEnd - expectedStart + 1
-//
-// 		// check existing partial chunk
-// 		var existingSize int64
-// 		if info, err := os.Stat(tmpFiles[i]); err == nil {
-// 			existingSize = info.Size()
-// 		}
-//
-// 		// chunk already complete - skip it
-// 		if existingSize == expectedChunkSize {
-// 			continue
-// 		}
-//
-// 		wg.Add(1)
-// 		go func(idx int, start, end, existing int64, tmpPath string) {
-// 			defer wg.Done()
-//
-// 			resumeStart := start + existing
-// 			req, err := d.newRequest("GET", urlStr)
-// 			if err != nil {
-// 				results <- result{idx, err}
-// 				return
-// 			}
-// 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", resumeStart, end))
-//
-// 			resp, err := d.Client.Do(req)
-// 			if err != nil {
-// 				results <- result{idx, err}
-// 				return
-// 			}
-// 			defer resp.Body.Close()
-//
-// 			// open in append mode if resuming, create otherwise
-// 			flag := os.O_CREATE | os.O_WRONLY
-// 			if existing > 0 {
-// 				flag |= os.O_APPEND
-// 			}
-// 			f, err := os.OpenFile(tmpPath, flag, 0o644)
-// 			if err != nil {
-// 				results <- result{idx, err}
-// 				return
-// 			}
-// 			defer f.Close()
-//
-// 			buf := make([]byte, 32*1024)
-// 			for {
-// 				n, err := resp.Body.Read(buf)
-// 				if n > 0 {
-// 					f.Write(buf[:n])
-// 					bar.Add(n)
-// 				}
-// 				if err != nil {
-// 					if err == io.EOF {
-// 						break
-// 					}
-// 					results <- result{idx, err}
-// 					return
-// 				}
-// 			}
-// 			results <- result{idx, nil}
-// 		}(i, expectedStart, expectedEnd, existingSize, tmpFiles[i])
-// 	}
-//
-// 	wg.Wait()
-// 	close(results)
-//
-// 	for r := range results {
-// 		if r.err != nil {
-// 			return fmt.Errorf("chunk %d failed: %w", r.index, r.err)
-// 		}
-// 	}
-//
-// 	// merge chunks
-// 	if err := mergeFiles(output, tmpFiles); err != nil {
-// 		return fmt.Errorf("merge failed: %w", err)
-// 	}
-//
-// 	fmt.Printf("✓ saved → %s\n", output)
-// 	return nil
-// }
-//
-// // streamDownload is the fallback single-stream path
-// func (d *Downloader) streamDownload(urlStr string) error {
+// func (d *Downloader) streamDownload(urlStr string) (bool, error) {
 // 	fmt.Println("method streamDownload")
 //
-// 	// First, do a HEAD request to get content length and check range support
+// 	// First, do a HEAD to get content length
 // 	headReq, err := d.newRequest("HEAD", urlStr)
 // 	if err != nil {
-// 		return err
+// 		return false, err
 // 	}
-//
 // 	headResp, err := d.Client.Do(headReq)
 // 	if err != nil {
-// 		return fmt.Errorf("HEAD failed: %w", err)
+// 		return false, fmt.Errorf("HEAD failed: %w", err)
 // 	}
 // 	headResp.Body.Close()
 //
@@ -502,60 +336,40 @@ func (d *Downloader) streamDownload(urlStr string) (bool, error) {
 // 	fileName := resolveFilename(headResp, finalURL)
 // 	output := filepath.Join(d.OutputDir, fileName)
 // 	contentLength := headResp.ContentLength
-// 	supportsRanges := headResp.Header.Get("Accept-Ranges") == "bytes"
 //
-// 	// Check for existing partial file
-// 	var existingSize int64
+// 	// Check for existing partial download
+// 	existingSize := int64(0)
 // 	if info, err := os.Stat(output); err == nil {
+// 		if info.Size() == contentLength {
+// 			fmt.Printf("✓ file already complete: %s\n", fileName)
+// 			return false, nil // skipped
+// 		}
 // 		existingSize = info.Size()
-//
-// 		// Already complete?
-// 		if contentLength > 0 && existingSize == contentLength {
-// 			fmt.Printf(
-// 				"  %s already complete (%s), skipping\n",
-// 				fileName,
-// 				formatBytes(existingSize),
-// 			)
-// 			return nil
-// 		}
-//
-// 		// File larger than expected? Restart
-// 		if contentLength > 0 && existingSize > contentLength {
-// 			fmt.Printf("  Warning: %s is larger than expected, restarting\n", fileName)
-// 			existingSize = 0
-// 		}
-//
-// 		// Can't resume if server doesn't support ranges
-// 		if !supportsRanges && existingSize > 0 {
-// 			fmt.Printf("  Warning: server doesn't support ranges, restarting %s\n", fileName)
-// 			existingSize = 0
-// 		}
 // 	}
 //
-// 	// Create GET request
+// 	// Now make the GET request
 // 	req, err := d.newRequest("GET", urlStr)
 // 	if err != nil {
-// 		return err
+// 		return false, err
 // 	}
 //
 // 	// Add Range header if resuming
 // 	if existingSize > 0 {
 // 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existingSize))
-// 		fmt.Printf("  Resuming %s from %s\n", fileName, formatBytes(existingSize))
 // 	}
 //
 // 	resp, err := d.Client.Do(req)
 // 	if err != nil {
-// 		return fmt.Errorf("GET failed: %w", err)
+// 		return false, fmt.Errorf("GET failed: %w", err)
 // 	}
 // 	defer resp.Body.Close()
 //
 // 	// Accept both 200 (full) and 206 (partial content)
 // 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-// 		return fmt.Errorf("bad status: %s", resp.Status)
+// 		return false, fmt.Errorf("bad status: %s", resp.Status)
 // 	}
 //
-// 	// Open file in append mode if resuming, create otherwise
+// 	// Open in append mode if resuming
 // 	flag := os.O_CREATE | os.O_WRONLY
 // 	if existingSize > 0 {
 // 		flag |= os.O_APPEND
@@ -563,19 +377,17 @@ func (d *Downloader) streamDownload(urlStr string) (bool, error) {
 //
 // 	f, err := os.OpenFile(output, flag, 0o644)
 // 	if err != nil {
-// 		return err
+// 		return false, err
 // 	}
 // 	defer f.Close()
 //
-// 	// Initialize progress bar with existing bytes
 // 	bar := ui.NewBarWithOffset(contentLength, fileName, existingSize)
-//
 // 	buf := make([]byte, 32*1024)
 // 	for {
 // 		n, err := resp.Body.Read(buf)
 // 		if n > 0 {
 // 			if _, werr := f.Write(buf[:n]); werr != nil {
-// 				return fmt.Errorf("write failed: %w", werr)
+// 				return false, fmt.Errorf("write failed: %w", werr)
 // 			}
 // 			bar.Add(n)
 // 		}
@@ -583,26 +395,12 @@ func (d *Downloader) streamDownload(urlStr string) (bool, error) {
 // 			break
 // 		}
 // 		if err != nil {
-// 			return err
+// 			return false, err
 // 		}
 // 	}
 //
 // 	fmt.Printf("✓ saved → %s\n", output)
-// 	return nil
-// }
-//
-// // Helper to format bytes
-// func formatBytes(bytes int64) string {
-// 	const unit = 1024
-// 	if bytes < unit {
-// 		return fmt.Sprintf("%d B", bytes)
-// 	}
-// 	div, exp := int64(unit), 0
-// 	for n := bytes / unit; n >= unit; n /= unit {
-// 		div *= unit
-// 		exp++
-// 	}
-// 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+// 	return true, nil
 // }
 
 // mergeFiles concatenates tmpFiles into dst in order, then removes them
