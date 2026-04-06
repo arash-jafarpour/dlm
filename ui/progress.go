@@ -62,14 +62,23 @@ func (b *Bar) render() {
 		speed = float64(current) / elapsed
 	}
 
+	var eta string
+	if speed > 0 && current < b.total {
+		remaining := b.total - current
+		etaSeconds := float64(remaining) / speed
+		etaDuration := time.Duration(etaSeconds * float64(time.Second))
+		eta = fmt.Sprintf(" ETA %s", etaDuration.Round(time.Second))
+	}
+
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", b.width-filled)
-	fmt.Printf("\r%s %s %.1f%% %s/%s  %s/s",
+	fmt.Printf("\r%s %s %.1f%% %s/%s  %s/s%s",
 		b.label,
 		bar,
 		percent,
 		formatBytes(current),
 		formatBytes(b.total),
 		formatBytes(int64(speed)),
+		eta, // Add ETA here
 	)
 
 	if current >= b.total && b.total > 0 {
