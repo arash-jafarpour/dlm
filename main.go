@@ -10,7 +10,7 @@ import (
 	"modules/reader"
 )
 
-func markCompleted(urlstr string) error {
+func markCompleted(urlStr string) error {
 	// Append to completed.txt with timestamp
 	f, err := os.OpenFile("completed.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -19,11 +19,11 @@ func markCompleted(urlstr string) error {
 	defer f.Close()
 
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	_, err = fmt.Fprintf(f, "%s | %s\n", timestamp, urlstr)
+	_, err = fmt.Fprintf(f, "%s | %s\n", timestamp, urlStr)
 	return err
 }
 
-func removeFromLinks(urlstr string) error {
+func removeFromLinks(urlStr string) error {
 	// Read all links
 	data, err := os.ReadFile("queue.txt")
 	if err != nil {
@@ -34,7 +34,7 @@ func removeFromLinks(urlstr string) error {
 	var kept []string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line != urlstr && line != "" {
+		if line != urlStr && line != "" {
 			kept = append(kept, line)
 		}
 	}
