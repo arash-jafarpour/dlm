@@ -17,18 +17,19 @@ import (
 )
 
 const (
-	numChunks  = 8
 	maxRetries = 2
 )
 
 type Downloader struct {
 	OutputDir string
+	NumChunks int
 	Client    *http.Client
 }
 
-func New(outputDir string) *Downloader {
+func New(outputDir string, numChunks int) *Downloader {
 	return &Downloader{
 		OutputDir: outputDir,
+		NumChunks: numChunks,
 		Client: &http.Client{
 			Timeout: 0,
 			Transport: &http.Transport{
@@ -129,20 +130,20 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 	}
 	bar := ui.NewBarWithOffset(totalSize, fileName, currentSize)
 
-	chunkSize := totalSize / numChunks
+	chunkSize := totalSize / int64(d.NumChunks)
 	type result struct {
 		index int
 		err   error
 	}
 
-	tmpFiles := make([]string, numChunks)
-	results := make(chan result, numChunks)
+	tmpFiles := make([]string, d.NumChunks)
+	results := make(chan result, d.NumChunks)
 	var wg sync.WaitGroup
 
-	for i := range numChunks {
+	for i := range d.NumChunks {
 		start := int64(i) * chunkSize
 		end := start + chunkSize - 1
-		if i == numChunks-1 {
+		if i == d.NumChunks-1 {
 			end = totalSize - 1 // last chunk gets the remainder
 		}
 
@@ -317,91 +318,6 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 	fmt.Printf("✓ saved → %s\n", output)
 	return true, nil
 }
-
-// func (d *Downloader) streamDownload(urlStr string) (bool, error) {
-// 	fmt.Println("method streamDownload")
-//
-// 	// First, do a HEAD to get content length
-// 	headReq, err := d.newRequest("HEAD", urlStr)
-// 	if err != nil {
-// 		return false, err
-// 	}
-// 	headResp, err := d.Client.Do(headReq)
-// 	if err != nil {
-// 		return false, fmt.Errorf("HEAD failed: %w", err)
-// 	}
-// 	headResp.Body.Close()
-//
-// 	finalURL := headResp.Request.URL.String()
-// 	fileName := resolveFilename(headResp, finalURL)
-// 	output := filepath.Join(d.OutputDir, fileName)
-// 	contentLength := headResp.ContentLength
-//
-// 	// Check for existing partial download
-// 	existingSize := int64(0)
-// 	if info, err := os.Stat(output); err == nil {
-// 		if info.Size() == contentLength {
-// 			fmt.Printf("✓ file already complete: %s\n", fileName)
-// 			return false, nil // skipped
-// 		}
-// 		existingSize = info.Size()
-// 	}
-//
-// 	// Now make the GET request
-// 	req, err := d.newRequest("GET", urlStr)
-// 	if err != nil {
-// 		return false, err
-// 	}
-//
-// 	// Add Range header if resuming
-// 	if existingSize > 0 {
-// 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existingSize))
-// 	}
-//
-// 	resp, err := d.Client.Do(req)
-// 	if err != nil {
-// 		return false, fmt.Errorf("GET failed: %w", err)
-// 	}
-// 	defer resp.Body.Close()
-//
-// 	// Accept both 200 (full) and 206 (partial content)
-// 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-// 		return false, fmt.Errorf("bad status: %s", resp.Status)
-// 	}
-//
-// 	// Open in append mode if resuming
-// 	flag := os.O_CREATE | os.O_WRONLY
-// 	if existingSize > 0 {
-// 		flag |= os.O_APPEND
-// 	}
-//
-// 	f, err := os.OpenFile(output, flag, 0o644)
-// 	if err != nil {
-// 		return false, err
-// 	}
-// 	defer f.Close()
-//
-// 	bar := ui.NewBarWithOffset(contentLength, fileName, existingSize)
-// 	buf := make([]byte, 32*1024)
-// 	for {
-// 		n, err := resp.Body.Read(buf)
-// 		if n > 0 {
-// 			if _, werr := f.Write(buf[:n]); werr != nil {
-// 				return false, fmt.Errorf("write failed: %w", werr)
-// 			}
-// 			bar.Add(n)
-// 		}
-// 		if err == io.EOF {
-// 			break
-// 		}
-// 		if err != nil {
-// 			return false, err
-// 		}
-// 	}
-//
-// 	fmt.Printf("✓ saved → %s\n", output)
-// 	return true, nil
-// }
 
 // mergeFiles concatenates tmpFiles into dst in order, then removes them
 func mergeFiles(dst string, tmpFiles []string) error {

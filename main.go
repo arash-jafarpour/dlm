@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -44,21 +45,44 @@ func removeFromLinks(urlStr string) error {
 }
 
 func main() {
-	links, err := reader.ReadLinks("queue.txt")
-	if err != nil {
-		panic(fmt.Sprintf("error reading links: %v", err))
-	}
-	if len(links.Links) == 0 {
-		fmt.Println("no links found in queue to download")
+	// --- flags ---
+	queueFile := flag.String("queue", "queue.txt", "path to queue file")
+	outputDir := flag.String("out", "./downloads", "output directory")
+	singleURL := flag.String("url", "", "download a single URL directly")
+	chunks := flag.Int("chunks", 8, "number of parallel chunks")
+	flag.Parse()
+
+	dl := downloader.New(*outputDir, *chunks)
+
+	// single URL mode
+	if *singleURL != "" {
+		fmt.Printf("→ downloading: %s\n", *singleURL)
+		completed, err := dl.Download(*singleURL)
+		if err != nil {
+			fmt.Printf("✗ failed: %v\n", err)
+			os.Exit(1)
+		}
+		if completed {
+			fmt.Println("✓ done")
+		}
 		return
 	}
 
-	dl := downloader.New("./downloads")
+	// auto / queue mode (existing behavior)
+	lf, err := reader.ReadLinks(*queueFile)
+	if err != nil {
+		fmt.Printf("error reading queue: %v\n", err)
+		os.Exit(1)
+	}
+	if len(lf.Links) == 0 {
+		fmt.Println("no links found in queue")
+		return
+	}
 
-	for _, url := range links.Links {
-		fmt.Printf("→ downloading: %s\n", url)
+	for _, urlStr := range lf.Links {
+		fmt.Printf("→ downloading: %s\n", urlStr)
 
-		completed, err := dl.Download(url)
+		completed, err := dl.Download(urlStr)
 		if err != nil {
 			fmt.Printf("✗ failed: %v\n", err)
 			continue
@@ -66,10 +90,10 @@ func main() {
 
 		if completed {
 			// Only mark as completed if actually downloaded
-			if err := markCompleted(url); err != nil {
+			if err := markCompleted(urlStr); err != nil {
 				fmt.Printf("Warning: couldn't mark as completed: %v\n", err)
 			}
-			if err := removeFromLinks(url); err != nil {
+			if err := removeFromLinks(urlStr); err != nil {
 				fmt.Printf("Warning: couldn't remove from queue.txt: %v\n", err)
 			}
 		}
