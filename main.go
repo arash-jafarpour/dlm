@@ -7,13 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"modules/config"
 	"modules/downloader"
 	"modules/reader"
 )
 
-func markCompleted(urlStr string) error {
+func markCompleted(cfg *config.Config, urlStr string) error {
 	// Append to completed.txt with timestamp
-	f, err := os.OpenFile("completed.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(cfg.CompletedFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
@@ -24,9 +25,9 @@ func markCompleted(urlStr string) error {
 	return err
 }
 
-func removeFromLinks(urlStr string) error {
+func removeFromLinks(cfg *config.Config, urlStr string) error {
 	// Read all links
-	data, err := os.ReadFile("queue.txt")
+	data, err := os.ReadFile(cfg.QueueFile)
 	if err != nil {
 		return err
 	}
@@ -41,23 +42,37 @@ func removeFromLinks(urlStr string) error {
 	}
 
 	// Write back
-	return os.WriteFile("queue.txt", []byte(strings.Join(kept, "\n")+"\n"), 0o644)
+	return os.WriteFile(cfg.QueueFile, []byte(strings.Join(kept, "\n")+"\n"), 0o644)
 }
 
 func main() {
-	// --- flags ---
-	queueFile := flag.String("queue", "queue.txt", "path to queue file")
-	outputDir := flag.String("out", "./downloads", "output directory")
-	singleURL := flag.String("url", "", "download a single URL directly")
-	chunks := flag.Int("chunks", 8, "number of parallel chunks")
+	// start with safe defaults
+	cfg := config.Default()
+
+	// override with flags
+	flag.StringVar(&cfg.QueueFile, "queue", cfg.QueueFile, "path to queue file")
+	flag.StringVar(&cfg.OutputDir, "out", cfg.OutputDir, "download output directory")
+	flag.IntVar(&cfg.NumChunks, "chunks", cfg.NumChunks, "number of parallel chunks")
+	flag.BoolVar(
+		&cfg.InsecureSkipVerify,
+		"insecure",
+		cfg.InsecureSkipVerify,
+		"skip TLS verification",
+	)
+	flag.StringVar(&cfg.SingleURL, "url", "", "download a single URL directly")
 	flag.Parse()
 
-	dl := downloader.New(*outputDir, *chunks)
+	// validate before doing anything
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid config: %v\n", err)
+		os.Exit(1)
+	}
 
-	// single URL mode
-	if *singleURL != "" {
-		fmt.Printf("→ downloading: %s\n", *singleURL)
-		completed, err := dl.Download(*singleURL)
+	dl := downloader.New(cfg)
+
+	if cfg.SingleURL != "" {
+		fmt.Printf("→ downloading: %s\n", cfg.SingleURL)
+		completed, err := dl.Download(cfg.SingleURL)
 		if err != nil {
 			fmt.Printf("✗ failed: %v\n", err)
 			os.Exit(1)
@@ -68,8 +83,7 @@ func main() {
 		return
 	}
 
-	// auto / queue mode (existing behavior)
-	lf, err := reader.ReadLinks(*queueFile)
+	lf, err := reader.ReadLinks(cfg.QueueFile)
 	if err != nil {
 		fmt.Printf("error reading queue: %v\n", err)
 		os.Exit(1)
@@ -90,10 +104,10 @@ func main() {
 
 		if completed {
 			// Only mark as completed if actually downloaded
-			if err := markCompleted(urlStr); err != nil {
+			if err := markCompleted(cfg, urlStr); err != nil {
 				fmt.Printf("Warning: couldn't mark as completed: %v\n", err)
 			}
-			if err := removeFromLinks(urlStr); err != nil {
+			if err := removeFromLinks(cfg, urlStr); err != nil {
 				fmt.Printf("Warning: couldn't remove from queue.txt: %v\n", err)
 			}
 		}

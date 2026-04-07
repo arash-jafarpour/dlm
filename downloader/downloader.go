@@ -13,38 +13,36 @@ import (
 	"sync"
 	"time"
 
+	"modules/config"
 	"modules/ui"
 )
 
-const (
-	maxRetries = 2
-)
-
 type Downloader struct {
-	OutputDir string
-	NumChunks int
-	Client    *http.Client
+	OutputDir  string
+	NumChunks  int
+	MaxRetries int
+	Client     *http.Client
 }
 
-func New(outputDir string, numChunks int) *Downloader {
+func New(cfg *config.Config) *Downloader {
 	return &Downloader{
-		OutputDir: outputDir,
-		NumChunks: numChunks,
+		OutputDir:  cfg.OutputDir,
+		NumChunks:  cfg.NumChunks,
+		MaxRetries: cfg.MaxRetries,
 		Client: &http.Client{
 			Timeout: 0,
 			Transport: &http.Transport{
-				DisableCompression:    false,
-				MaxIdleConns:          50,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ResponseHeaderTimeout: 10 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
+				MaxIdleConns:          cfg.MaxIdleConns,
+				IdleConnTimeout:       cfg.IdleConnTimeout,
+				TLSHandshakeTimeout:   cfg.TLSHandshakeTimeout,
+				ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
+				ExpectContinueTimeout: cfg.ExpectContinueTimeout,
 				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true, // TODO: remove before production
+					InsecureSkipVerify: cfg.InsecureSkipVerify,
 				},
 				DialContext: (&net.Dialer{
-					Timeout:   10 * time.Second,
-					KeepAlive: 30 * time.Second,
+					Timeout:   cfg.DialTimeout,
+					KeepAlive: cfg.KeepAlive,
 				}).DialContext,
 			},
 		},
@@ -54,7 +52,7 @@ func New(outputDir string, numChunks int) *Downloader {
 func (d *Downloader) Download(urlStr string) (bool, error) {
 	var lastErr error
 	var completed bool
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	for attempt := 1; attempt <= d.MaxRetries; attempt++ {
 		completed, lastErr = d.doDownload(urlStr)
 		if lastErr == nil {
 			return completed, nil
