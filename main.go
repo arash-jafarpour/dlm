@@ -1,22 +1,24 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
-	"modules/config"
-	"modules/downloader"
-	"modules/reader"
+	"dlm/config"
+	"dlm/downloader"
+	apperrors "dlm/errors"
+	"dlm/reader"
 )
 
 func markCompleted(cfg *config.Config, urlStr string) error {
 	// Append to completed.txt with timestamp
 	f, err := os.OpenFile(cfg.CompletedFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return err
+		return apperrors.WrapFileError(cfg.CompletedFile, "open", err)
 	}
 	defer f.Close()
 
@@ -29,7 +31,7 @@ func removeFromLinks(cfg *config.Config, urlStr string) error {
 	// Read all links
 	data, err := os.ReadFile(cfg.QueueFile)
 	if err != nil {
-		return err
+		return apperrors.WrapFileError(cfg.QueueFile, "read", err)
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -43,6 +45,31 @@ func removeFromLinks(cfg *config.Config, urlStr string) error {
 
 	// Write back
 	return os.WriteFile(cfg.QueueFile, []byte(strings.Join(kept, "\n")+"\n"), 0o644)
+}
+
+func logError(err error) {
+	var httpErr *apperrors.HTTPError
+	var fileErr *apperrors.FileError
+	var chunkErr *apperrors.ChunkError
+
+	switch {
+	case errors.As(err, &chunkErr):
+		if chunkErr.Index == -1 {
+			fmt.Printf("✗ merge failed: %v\n", chunkErr.Err)
+		} else {
+			fmt.Printf("✗ chunk %d failed: %v\n", chunkErr.Index, chunkErr.Err)
+		}
+	case errors.As(err, &httpErr):
+		if httpErr.StatusCode > 0 {
+			fmt.Printf("✗ HTTP %d for %s: %s\n", httpErr.StatusCode, httpErr.URL, httpErr.Message)
+		} else {
+			fmt.Printf("✗ network error for %s: %s\n", httpErr.URL, httpErr.Message)
+		}
+	case errors.As(err, &fileErr):
+		fmt.Printf("✗ file %s error on %q: %v\n", fileErr.Op, fileErr.Path, fileErr.Err)
+	default:
+		fmt.Printf("✗ failed: %v\n", err)
+	}
 }
 
 func main() {
@@ -74,7 +101,7 @@ func main() {
 		fmt.Printf("→ downloading: %s\n", cfg.SingleURL)
 		completed, err := dl.Download(cfg.SingleURL)
 		if err != nil {
-			fmt.Printf("✗ failed: %v\n", err)
+			logError(err)
 			os.Exit(1)
 		}
 		if completed {
@@ -85,7 +112,7 @@ func main() {
 
 	lf, err := reader.ReadLinks(cfg.QueueFile)
 	if err != nil {
-		fmt.Printf("error reading queue: %v\n", err)
+		logError(err)
 		os.Exit(1)
 	}
 	if len(lf.Links) == 0 {
@@ -98,7 +125,7 @@ func main() {
 
 		completed, err := dl.Download(urlStr)
 		if err != nil {
-			fmt.Printf("✗ failed: %v\n", err)
+			logError(err)
 			continue
 		}
 

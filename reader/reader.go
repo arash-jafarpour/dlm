@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"os"
 	"strings"
+
+	apperrors "dlm/errors"
 )
 
 type LinkFile struct {
@@ -15,7 +17,7 @@ type LinkFile struct {
 func ReadLinks(filePath string) (*LinkFile, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		return nil, apperrors.WrapFileError(filePath, "open", err)
 	}
 	// Schedule the close to happen
 	// at the very end of this file
@@ -35,7 +37,7 @@ func ReadLinks(filePath string) (*LinkFile, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, apperrors.WrapFileError(filePath, "read", err)
 	}
 
 	return &LinkFile{Links: links}, nil

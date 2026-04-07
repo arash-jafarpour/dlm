@@ -13,8 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"modules/config"
-	"modules/ui"
+	"dlm/config"
+	apperrors "dlm/errors"
+	"dlm/ui"
 )
 
 type Downloader struct {
@@ -36,8 +37,7 @@ func New(cfg *config.Config) *Downloader {
 				IdleConnTimeout:       cfg.IdleConnTimeout,
 				TLSHandshakeTimeout:   cfg.TLSHandshakeTimeout,
 				ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
-				ExpectContinueTimeout: cfg.ExpectContinueTimeout,
-				TLSClientConfig: &tls.Config{
+				ExpectContinueTimeout: cfg.ExpectContinueTimeout, TLSClientConfig: &tls.Config{
 					InsecureSkipVerify: cfg.InsecureSkipVerify,
 				},
 				DialContext: (&net.Dialer{
@@ -66,7 +66,7 @@ func (d *Downloader) Download(urlStr string) (bool, error) {
 
 func (d *Downloader) doDownload(urlStr string) (bool, error) {
 	if err := os.MkdirAll(d.OutputDir, 0o755); err != nil {
-		return false, err
+		return false, apperrors.WrapFileError(d.OutputDir, "mkdir", err)
 	}
 
 	// Try HEAD first
@@ -86,14 +86,19 @@ func (d *Downloader) doDownload(urlStr string) (bool, error) {
 		req, _ = d.newRequest("GET", urlStr)
 		resp, err = d.Client.Do(req)
 		if err != nil {
-			return false, fmt.Errorf("metadata fetch failed (HEAD and GET both failed): %w", err)
+			return false, apperrors.WrapHTTPError(
+				urlStr,
+				"metadata fetch failed (HEAD and GET both failed)",
+				-1,
+				err,
+			)
 		}
 	}
 	defer resp.Body.Close()
 
 	// check if resp is nil before using it
 	if resp == nil {
-		return false, fmt.Errorf("received nil response from server")
+		return false, apperrors.ErrNilResponse
 	}
 
 	finalURL := resp.Request.URL.String()
@@ -161,13 +166,13 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 
 	for res := range results {
 		if res.err != nil {
-			return false, fmt.Errorf("chunk %d failed: %w", res.index, res.err)
+			return false, apperrors.WrapChunkError(urlStr, res.index, res.err)
 		}
 	}
 
 	// merge chunks
 	if err := mergeFiles(output, tmpFiles); err != nil {
-		return false, fmt.Errorf("merge failed: %w", err)
+		return false, apperrors.WrapChunkError(urlStr, -1, err)
 	}
 
 	fmt.Printf("✓ saved → %s\n", output)
@@ -204,12 +209,12 @@ func (d *Downloader) downloadChunk(
 
 	resp, err := d.Client.Do(req)
 	if err != nil {
-		return err
+		return apperrors.WrapHTTPError(urlStr, "chunk request failed", -1, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status: %s", resp.Status)
+		return apperrors.NewStatusError(urlStr, resp)
 	}
 
 	// Open file in append mode for resume
@@ -221,7 +226,7 @@ func (d *Downloader) downloadChunk(
 
 	f, err := os.OpenFile(path, flag, 0o644)
 	if err != nil {
-		return err
+		return apperrors.WrapFileError(path, "open", err)
 	}
 	defer f.Close()
 
@@ -230,7 +235,7 @@ func (d *Downloader) downloadChunk(
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			if _, werr := f.Write(buf[:n]); werr != nil {
-				return werr
+				return apperrors.WrapFileError(path, "open", err)
 			}
 			bar.Add(n)
 		}
@@ -238,7 +243,7 @@ func (d *Downloader) downloadChunk(
 			break
 		}
 		if err != nil {
-			return err
+			return apperrors.WrapHTTPError(urlStr, "reading chunk body", -1, err)
 		}
 	}
 
@@ -264,7 +269,7 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 	// Now make the GET request
 	req, err := d.newRequest("GET", urlStr)
 	if err != nil {
-		return false, err
+		return false, apperrors.WrapDownloadError(urlStr, "creating GET request", err)
 	}
 
 	// Add Range header if resuming
@@ -274,13 +279,13 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 
 	resp, err := d.Client.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("GET failed: %w", err)
+		return false, apperrors.WrapHTTPError(urlStr, "GET request failed", -1, err)
 	}
 	defer resp.Body.Close()
 
 	// Accept both 200 (full) and 206 (partial content)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return false, fmt.Errorf("bad status: %s", resp.Status)
+		return false, apperrors.NewStatusError(urlStr, resp)
 	}
 
 	// Open in append mode if resuming
@@ -291,7 +296,7 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 
 	f, err := os.OpenFile(output, flag, 0o644)
 	if err != nil {
-		return false, err
+		return false, apperrors.WrapFileError(output, "open", err)
 	}
 	defer f.Close()
 
@@ -301,7 +306,7 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			if _, werr := f.Write(buf[:n]); werr != nil {
-				return false, fmt.Errorf("write failed: %w", werr)
+				return false, apperrors.WrapFileError(output, "write", werr)
 			}
 			bar.Add(n)
 		}
@@ -309,7 +314,7 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 			break
 		}
 		if err != nil {
-			return false, err
+			return false, apperrors.WrapHTTPError(urlStr, "reading response body", -1, err)
 		}
 	}
 
@@ -321,18 +326,18 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 func mergeFiles(dst string, tmpFiles []string) error {
 	out, err := os.Create(dst)
 	if err != nil {
-		return err
+		return apperrors.WrapFileError(dst, "create", err)
 	}
 	defer out.Close()
 
 	for _, tmp := range tmpFiles {
 		f, err := os.Open(tmp)
 		if err != nil {
-			return err
+			return apperrors.WrapFileError(tmp, "open", err)
 		}
 		if _, err := io.Copy(out, f); err != nil {
 			f.Close()
-			return err
+			return apperrors.WrapFileError(tmp, "copy", err)
 		}
 		f.Close()
 		os.Remove(tmp)
@@ -343,7 +348,11 @@ func mergeFiles(dst string, tmpFiles []string) error {
 func (d *Downloader) newRequest(method, urlStr string) (*http.Request, error) {
 	req, err := http.NewRequest(method, urlStr, nil)
 	if err != nil {
-		return nil, fmt.Errorf("%s request failed: %w", method, err)
+		return nil, apperrors.WrapDownloadError(
+			urlStr,
+			fmt.Sprintf("creating %s request failed", method),
+			err,
+		)
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; dlm/1.0)")
 	return req, nil
