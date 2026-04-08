@@ -71,19 +71,30 @@ func (b *Bar) render() {
 	}
 
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", b.width-filled)
-	fmt.Printf("\r%s %s %.1f%% %s/%s  %s/s%s",
-		b.label,
+	suffix := fmt.Sprintf(" %s %.1f%% %s/%s  %s/s%s",
 		bar,
 		percent,
 		formatBytes(current),
 		formatBytes(b.total),
 		formatBytes(int64(speed)),
-		eta, // Add ETA here
+		eta,
 	)
+	label := normalizeLabel(b.label)
+
+	fmt.Printf("\r%s%s", label, suffix)
 
 	if current >= b.total && b.total > 0 {
 		fmt.Println()
 	}
+}
+
+func normalizeLabel(label string) string {
+	maxWidth := 64
+
+	if len(label) > maxWidth {
+		return label[:maxWidth-1] + "…"
+	}
+	return label
 }
 
 func formatBytes(b int64) string {
