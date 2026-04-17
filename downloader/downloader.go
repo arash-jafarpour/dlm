@@ -25,27 +25,29 @@ type Downloader struct {
 	Client     *http.Client
 }
 
+func buildHTTPClient(cfg *config.Config) *http.Client {
+	dialer := &net.Dialer{
+		Timeout:   cfg.DialTimeout,
+		KeepAlive: cfg.KeepAlive,
+	}
+	transport := &http.Transport{
+		MaxIdleConns:          cfg.MaxIdleConns,
+		IdleConnTimeout:       cfg.IdleConnTimeout,
+		TLSHandshakeTimeout:   cfg.TLSHandshakeTimeout,
+		ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
+		ExpectContinueTimeout: cfg.ExpectContinueTimeout,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify},
+		DialContext:           dialer.DialContext,
+	}
+	return &http.Client{Timeout: 0, Transport: transport}
+}
+
 func New(cfg *config.Config) *Downloader {
 	return &Downloader{
 		OutputDir:  cfg.OutputDir,
 		NumChunks:  cfg.NumChunks,
 		MaxRetries: cfg.MaxRetries,
-		Client: &http.Client{
-			Timeout: 0,
-			Transport: &http.Transport{
-				MaxIdleConns:          cfg.MaxIdleConns,
-				IdleConnTimeout:       cfg.IdleConnTimeout,
-				TLSHandshakeTimeout:   cfg.TLSHandshakeTimeout,
-				ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
-				ExpectContinueTimeout: cfg.ExpectContinueTimeout, TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: cfg.InsecureSkipVerify,
-				},
-				DialContext: (&net.Dialer{
-					Timeout:   cfg.DialTimeout,
-					KeepAlive: cfg.KeepAlive,
-				}).DialContext,
-			},
-		},
+		Client:     buildHTTPClient(cfg),
 	}
 }
 
@@ -115,14 +117,14 @@ func (d *Downloader) doDownload(urlStr string) (bool, error) {
 
 // chunkedDownload splits the file into numChunks parallel range requests
 func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (bool, error) {
-	fmt.Println("method chunkedDownload")
+	fmt.Println("with method chunkedDownload")
 	output := filepath.Join(d.OutputDir, fileName)
 
 	// Check if file already exists and is complete
 	info, err := os.Stat(output)
 	if err == nil {
 		if info.Size() == totalSize {
-			fmt.Printf("✓ file already complete: %s\n", fileName)
+			fmt.Printf("%s %s\n", ui.Green("✓ file already complete:"), fileName)
 			return false, nil // skipped
 		}
 	}
@@ -175,7 +177,7 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 		return false, apperrors.WrapChunkError(urlStr, -1, err)
 	}
 
-	fmt.Printf("✓ saved → %s\n", output)
+	fmt.Printf("%s %s\n", ui.Green("✓ saved →"), output)
 	return true, nil // actually completed
 }
 
@@ -230,21 +232,8 @@ func (d *Downloader) downloadChunk(
 	}
 	defer f.Close()
 
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := f.Write(buf[:n]); werr != nil {
-				return apperrors.WrapFileError(path, "open", err)
-			}
-			bar.Add(n)
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return apperrors.WrapHTTPError(urlStr, "reading chunk body", -1, err)
-		}
+	if err := copyToFile(resp.Body, f, bar, urlStr, path); err != nil {
+		return err
 	}
 
 	return nil
@@ -252,7 +241,7 @@ func (d *Downloader) downloadChunk(
 
 // streamDownload is the fallback single-stream path
 func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (bool, error) {
-	fmt.Println("method streamDownload")
+	fmt.Println("with method streamDownload")
 
 	output := filepath.Join(d.OutputDir, fileName)
 
@@ -260,7 +249,7 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 	existingSize := int64(0)
 	if info, err := os.Stat(output); err == nil {
 		if info.Size() == totalSize {
-			fmt.Printf("✓ file already complete: %s\n", fileName)
+			fmt.Printf("%s %s\n", ui.Green("✓ file already complete:"), fileName)
 			return false, nil // skipped
 		}
 		existingSize = info.Size()
@@ -301,24 +290,12 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 	defer f.Close()
 
 	bar := ui.NewBarWithOffset(totalSize, fileName, existingSize)
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := f.Write(buf[:n]); werr != nil {
-				return false, apperrors.WrapFileError(output, "write", werr)
-			}
-			bar.Add(n)
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return false, apperrors.WrapHTTPError(urlStr, "reading response body", -1, err)
-		}
+
+	if err := copyToFile(resp.Body, f, bar, urlStr, output); err != nil {
+		return false, err
 	}
 
-	fmt.Printf("✓ saved → %s\n", output)
+	fmt.Printf("%s %s\n", ui.Green("✓ saved →"), output)
 	return true, nil
 }
 
@@ -341,6 +318,27 @@ func mergeFiles(dst string, tmpFiles []string) error {
 		}
 		f.Close()
 		os.Remove(tmp)
+	}
+	return nil
+}
+
+// copyToFile reads from r and writes to f, updating bar. Returns any read/write error.
+func copyToFile(r io.Reader, f *os.File, bar *ui.Bar, urlStr, path string) error {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if _, werr := f.Write(buf[:n]); werr != nil {
+				return apperrors.WrapFileError(path, "write", werr)
+			}
+			bar.Add(n)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return apperrors.WrapHTTPError(urlStr, "reading body", -1, err)
+		}
 	}
 	return nil
 }

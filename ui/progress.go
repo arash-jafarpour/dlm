@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const maxLabelWidth = 64
+
 type Bar struct {
 	total     int64
 	current   atomic.Int64
@@ -21,7 +23,7 @@ func NewBar(total int64, label string) *Bar {
 	return &Bar{
 		total:     total,
 		width:     40,
-		label:     label,
+		label:     normalizeLabel(label),
 		startTime: time.Now(),
 	}
 }
@@ -30,14 +32,13 @@ func NewBarWithOffset(total int64, label string, offset int64) *Bar {
 	b := &Bar{
 		total:     total,
 		width:     40,
-		label:     label,
+		label:     normalizeLabel(label),
 		startTime: time.Now(),
 	}
 	b.current.Store(offset)
 	return b
 }
 
-// Add adds n bytes and redraws the bar
 func (b *Bar) Add(n int) {
 	b.current.Add(int64(n))
 	b.render()
@@ -66,35 +67,56 @@ func (b *Bar) render() {
 	if speed > 0 && current < b.total {
 		remaining := b.total - current
 		etaSeconds := float64(remaining) / speed
-		etaDuration := time.Duration(etaSeconds * float64(time.Second))
-		eta = fmt.Sprintf(" ETA %s", etaDuration.Round(time.Second))
+		eta = " ETA " + formatETA(etaSeconds)
 	}
 
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", b.width-filled)
-	suffix := fmt.Sprintf(" %s %.1f%% %s/%s  %s/s%s",
+	filledBar := Green(strings.Repeat("█", filled))
+	emptyBar := Gray(strings.Repeat("░", b.width-filled))
+	bar := filledBar + emptyBar
+
+	line := fmt.Sprintf("\r%s %s %s %s/%s  %s/s%s",
+		Bold(b.label),
 		bar,
-		percent,
+		Bold(fmt.Sprintf("%.1f%%", percent)),
 		formatBytes(current),
 		formatBytes(b.total),
 		formatBytes(int64(speed)),
 		eta,
 	)
-	label := normalizeLabel(b.label)
 
-	fmt.Printf("\r%s%s", label, suffix)
+	// Pad to 120 chars to clear previous line artifacts
+	fmt.Printf("%-120s", line)
 
 	if current >= b.total && b.total > 0 {
 		fmt.Println()
 	}
 }
 
-func normalizeLabel(label string) string {
-	maxWidth := 64
+func (b *Bar) Done() {
+	if b.current.Load() >= b.total && b.total > 0 {
+		fmt.Println()
+	}
+}
 
-	if len(label) > maxWidth {
-		return label[:maxWidth-1] + "…"
+func normalizeLabel(label string) string {
+	if len(label) > maxLabelWidth {
+		return label[:maxLabelWidth-3] + "..."
 	}
 	return label
+}
+
+func formatETA(seconds float64) string {
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", int(seconds))
+	}
+	minutes := int(seconds / 60)
+	secs := int(seconds) % 60
+	if minutes < 60 {
+		return fmt.Sprintf("%dm%ds", minutes, secs)
+	}
+	hours := minutes / 60
+	mins := minutes % 60
+	return fmt.Sprintf("%dh%dm", hours, mins)
 }
 
 func formatBytes(b int64) string {
@@ -109,3 +131,115 @@ func formatBytes(b int64) string {
 		return fmt.Sprintf("%d B", b)
 	}
 }
+
+// package ui
+//
+// import (
+// 	"fmt"
+// 	"strings"
+// 	"sync"
+// 	"sync/atomic"
+// 	"time"
+// )
+//
+// type Bar struct {
+// 	total     int64
+// 	current   atomic.Int64
+// 	width     int
+// 	label     string
+// 	startTime time.Time
+// 	mu        sync.Mutex
+// }
+//
+// func NewBar(total int64, label string) *Bar {
+// 	return &Bar{
+// 		total:     total,
+// 		width:     40,
+// 		label:     label,
+// 		startTime: time.Now(),
+// 	}
+// }
+//
+// func NewBarWithOffset(total int64, label string, offset int64) *Bar {
+// 	b := &Bar{
+// 		total:     total,
+// 		width:     40,
+// 		label:     label,
+// 		startTime: time.Now(),
+// 	}
+// 	b.current.Store(offset)
+// 	return b
+// }
+//
+// // Add adds n bytes and redraws the bar
+// func (b *Bar) Add(n int) {
+// 	b.current.Add(int64(n))
+// 	b.render()
+// }
+//
+// func (b *Bar) render() {
+// 	b.mu.Lock()
+// 	defer b.mu.Unlock()
+//
+// 	current := b.current.Load()
+//
+// 	var percent float64
+// 	var filled int
+// 	if b.total > 0 {
+// 		percent = float64(current) / float64(b.total) * 100
+// 		filled = int(percent / 100 * float64(b.width))
+// 	}
+//
+// 	elapsed := time.Since(b.startTime).Seconds()
+// 	var speed float64
+// 	if elapsed > 0 {
+// 		speed = float64(current) / elapsed
+// 	}
+//
+// 	var eta string
+// 	if speed > 0 && current < b.total {
+// 		remaining := b.total - current
+// 		etaSeconds := float64(remaining) / speed
+// 		etaDuration := time.Duration(etaSeconds * float64(time.Second))
+// 		eta = fmt.Sprintf(" ETA %s", etaDuration.Round(time.Second))
+// 	}
+//
+// 	bar := strings.Repeat("█", filled) + strings.Repeat("░", b.width-filled)
+// 	suffix := fmt.Sprintf(" %s %.1f%% %s/%s  %s/s%s",
+// 		bar,
+// 		percent,
+// 		formatBytes(current),
+// 		formatBytes(b.total),
+// 		formatBytes(int64(speed)),
+// 		eta,
+// 	)
+// 	label := normalizeLabel(b.label)
+//
+// 	fmt.Printf("\r%s%s", label, suffix)
+//
+// 	if current >= b.total && b.total > 0 {
+// 		fmt.Println()
+// 	}
+// }
+//
+// func normalizeLabel(label string) string {
+// 	maxWidth := 64
+//
+// 	if len(label) > maxWidth {
+// 		return label[:maxWidth-1] + "…"
+// 	}
+// 	return label
+// }
+//
+// func formatBytes(b int64) string {
+// 	switch {
+// 	case b >= 1<<30:
+// 		return fmt.Sprintf("%.2f GB", float64(b)/(1<<30))
+// 	case b >= 1<<20:
+// 		return fmt.Sprintf("%.2f MB", float64(b)/(1<<20))
+// 	case b >= 1<<10:
+// 		return fmt.Sprintf("%.2f KB", float64(b)/(1<<10))
+// 	default:
+// 		return fmt.Sprintf("%d B", b)
+// 	}
+// }
