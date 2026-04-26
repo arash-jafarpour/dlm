@@ -352,7 +352,11 @@ func (d *Downloader) newRequest(method, urlStr string) (*http.Request, error) {
 			err,
 		)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; dlm/1.0)")
+	// req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; dlm/1.0)")
+	req.Header.Set(
+		"User-Agent",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+	)
 	return req, nil
 }
 

@@ -89,7 +89,7 @@ func main() {
 
 	// override with flags
 	flag.StringVar(&cfg.QueueFile, "queue", cfg.QueueFile, "path to queue file")
-	flag.StringVar(&cfg.OutputDir, "out", cfg.OutputDir, "download output directory")
+	flag.StringVar(&cfg.OutputDir, "out", cfg.OutputDir, "output directory")
 	flag.IntVar(&cfg.NumChunks, "chunks", cfg.NumChunks, "number of parallel chunks")
 	flag.BoolVar(
 		&cfg.InsecureSkipVerify,
