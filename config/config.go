@@ -1,76 +1,93 @@
 package config
 
 import (
-	"errors"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 )
 
-// Config holds every tunable value in the application.
-// Nothing else should have magic numbers or hard-coded paths.
 type Config struct {
-	// Files
-	QueueFile     string
-	CompletedFile string
-	OutputDir     string
-
-	// URL
-	SingleURL string
-
-	// Download behavior
-	NumChunks  int
-	MaxRetries int
-
-	// HTTP timeouts
-	DialTimeout           time.Duration
-	KeepAlive             time.Duration
-	TLSHandshakeTimeout   time.Duration
-	ResponseHeaderTimeout time.Duration
-	IdleConnTimeout       time.Duration
-	ExpectContinueTimeout time.Duration
-	MaxIdleConns          int
-
-	// TLS
-	InsecureSkipVerify bool
+	NumChunks             int           `json:"num_chunks"`
+	InsecureSkipVerify    bool          `json:"insecure_skip_verify"`
+	OutputDir             string        `json:"output_dir"`
+	QueueFile             string        `json:"queue_file"`
+	CompletedFile         string        `json:"-"`
+	MaxRetries            int           `json:"-"`
+	DialTimeout           time.Duration `json:"-"`
+	KeepAlive             time.Duration `json:"-"`
+	MaxIdleConns          int           `json:"-"`
+	IdleConnTimeout       time.Duration `json:"-"`
+	TLSHandshakeTimeout   time.Duration `json:"-"`
+	ResponseHeaderTimeout time.Duration `json:"-"`
+	ExpectContinueTimeout time.Duration `json:"-"`
 }
 
-// Default returns a Config populated with sensible defaults.
 func Default() *Config {
 	return &Config{
-		QueueFile:     "queue.txt",
-		CompletedFile: "completed.txt",
-		OutputDir:     "./downloads",
-
-		SingleURL: "",
-
-		NumChunks:  8,
-		MaxRetries: 2,
-
+		NumChunks:             8,
+		InsecureSkipVerify:    false,
+		OutputDir:             "downloads",
+		QueueFile:             "queue.txt",
+		CompletedFile:         "completed.txt",
+		MaxRetries:            3,
 		DialTimeout:           10 * time.Second,
 		KeepAlive:             30 * time.Second,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 10 * time.Second,
-		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		MaxIdleConns:          50,
-
-		InsecureSkipVerify: false,
 	}
 }
 
-// Validate checks that the Config has no obviously wrong values.
-// Call this once after building the config (e.g. after flag parsing).
+func Load(path string) (*Config, error) {
+	cfg := Default()
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return cfg, nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config: %w", err)
+	}
+
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse config: %w", err)
+	}
+
+	return cfg, nil
+}
+
+func (c *Config) Save(path string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+
+	return nil
+}
+
 func (c *Config) Validate() error {
-	if c.OutputDir == "" {
-		return errors.New("output directory cannot be empty")
-	}
-	if c.QueueFile == "" {
-		return errors.New("queue file path cannot be empty")
-	}
 	if c.NumChunks < 1 {
-		return errors.New("NumChunks must be at least 1")
+		return fmt.Errorf("num_chunks must be at least 1")
 	}
 	if c.MaxRetries < 0 {
-		return errors.New("MaxRetries cannot be negative")
+		return fmt.Errorf("max_retries cannot be negative")
+	}
+	if c.DialTimeout < 0 {
+		return fmt.Errorf("dial_timeout cannot be negative")
 	}
 	return nil
 }
