@@ -16,7 +16,7 @@ A fast, cli download manager with queue support and persistent configuration.
 ```bash
 git clone https://github.com/arash-jafarpour/dlm
 cd dlm
-go build
+go build -o dlm
 sudo mv ./dlm /usr/local/bin/
 ```
 
