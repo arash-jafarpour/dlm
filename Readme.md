@@ -4,7 +4,7 @@ A fast, parallel download manager with queue support and persistent configuratio
 
 ## Features
 
-- Parallel downloads with configurable chunk size
+- File downloads with configurable number of chunks
 - Queue management for batch downloads
 - Persistent configuration with sensible defaults
 - Progress tracking with real-time statistics
