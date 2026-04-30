@@ -13,7 +13,7 @@ type Config struct {
 	InsecureSkipVerify    bool          `json:"insecure_skip_verify"`
 	OutputDir             string        `json:"output_dir"`
 	QueueFile             string        `json:"queue_file"`
-	CompletedFile         string        `json:"-"`
+	CompletedFile         string        `json:"completed_file"`
 	MaxRetries            int           `json:"-"`
 	DialTimeout           time.Duration `json:"-"`
 	KeepAlive             time.Duration `json:"-"`
@@ -25,12 +25,22 @@ type Config struct {
 }
 
 func Default() *Config {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "."
+	}
+
+	downloadsDir := filepath.Join(homeDir, "Downloads", "dlm")
+	configDir := filepath.Join(homeDir, ".config")
+	queueFilePath := filepath.Join(configDir, "queue.txt")
+	completedFilePath := filepath.Join(configDir, "completed.txt")
+
 	return &Config{
 		NumChunks:             8,
 		InsecureSkipVerify:    false,
-		OutputDir:             "downloads",
-		QueueFile:             "queue.txt",
-		CompletedFile:         "completed.txt",
+		OutputDir:             downloadsDir,
+		QueueFile:             queueFilePath,
+		CompletedFile:         completedFilePath,
 		MaxRetries:            3,
 		DialTimeout:           10 * time.Second,
 		KeepAlive:             30 * time.Second,

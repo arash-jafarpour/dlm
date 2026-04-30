@@ -67,6 +67,13 @@ func setConfig(ctx *Context, key, value string) {
 		}
 		ctx.Config.QueueFile = value
 
+	case "completed_file":
+		if err := config.ValidateCompletedFile(value); err != nil {
+			fmt.Printf("error: %v\n", err)
+			os.Exit(1)
+		}
+		ctx.Config.CompletedFile = value
+
 	case "output_dir":
 		if err := config.ValidateOutputDir(value); err != nil {
 			fmt.Printf("error: %v\n", err)
@@ -95,7 +102,9 @@ func setConfig(ctx *Context, key, value string) {
 
 	default:
 		fmt.Printf("unknown config key: %s\n", key)
-		fmt.Println("valid keys: queue_file, output_dir, num_chunks, insecure_skip_verify")
+		fmt.Println(
+			"valid keys: queue_file, completed_file, output_dir, num_chunks, insecure_skip_verify",
+		)
 		os.Exit(1)
 	}
 

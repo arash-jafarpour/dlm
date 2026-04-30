@@ -20,7 +20,7 @@ func queueCmd(ctx *Context, args []string) {
 	}
 
 	if len(args) < 1 {
-		fmt.Println("queue subcommands: add, list, clear")
+		fmt.Println("queue subcommands: add, list, clear, path")
 		fmt.Println("Run 'dlm queue --help' for more information")
 		os.Exit(1)
 	}
@@ -36,6 +36,8 @@ func queueCmd(ctx *Context, args []string) {
 		queueList(ctx)
 	case "clear":
 		queueClear(ctx)
+	case "path":
+		fmt.Println(ctx.Config.QueueFile)
 	default:
 		fmt.Printf("unknown queue subcommand: %s\n", args[0])
 		os.Exit(1)

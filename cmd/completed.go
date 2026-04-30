@@ -18,7 +18,7 @@ func completedCmd(ctx *Context, args []string) {
 	}
 
 	if len(args) < 1 {
-		fmt.Println("completed subcommands: clear")
+		fmt.Println("completed subcommands: clear, path")
 		fmt.Println("Run 'dlm completed --help' for more information")
 		os.Exit(1)
 	}
@@ -26,6 +26,8 @@ func completedCmd(ctx *Context, args []string) {
 	switch args[0] {
 	case "clear":
 		completedClear(ctx)
+	case "path":
+		fmt.Println(ctx.Config.CompletedFile)
 	default:
 		fmt.Printf("unknown completed subcommand: %s\n", args[0])
 		os.Exit(1)

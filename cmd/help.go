@@ -50,6 +50,10 @@ var commandTree = CommandInfo{
 					Name:        "clear",
 					Description: "Clear all URLs from the queue",
 				},
+				"path": {
+					Name:        "path",
+					Description: "Show queue file path",
+				},
 			},
 		},
 		"download": {
@@ -62,33 +66,14 @@ var commandTree = CommandInfo{
 					Args: []ArgInfo{
 						{Name: "url", Required: true, Description: "URL to download"},
 					},
-					Flags: []FlagInfo{
-						{
-							Name:        "out",
-							Short:       "o",
-							Type:        "string",
-							Default:     "",
-							Description: "Output directory",
-						},
-						{
-							Name:        "chunks",
-							Short:       "c",
-							Type:        "int",
-							Default:     "4",
-							Description: "Number of parallel chunks",
-						},
-						{
-							Name:        "insecure",
-							Short:       "",
-							Type:        "bool",
-							Default:     "false",
-							Description: "Skip TLS verification",
-						},
-					},
 				},
 				"queue": {
 					Name:        "queue",
 					Description: "Download all URLs from the queue",
+				},
+				"path": {
+					Name:        "path",
+					Description: "Show output directory path",
 				},
 			},
 		},
@@ -99,6 +84,10 @@ var commandTree = CommandInfo{
 				"clear": {
 					Name:        "clear",
 					Description: "Clear completed downloads list",
+				},
+				"path": {
+					Name:        "path",
+					Description: "Show completed file path",
 				},
 			},
 		},

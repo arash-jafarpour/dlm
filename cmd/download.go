@@ -21,7 +21,7 @@ func downloadCmd(ctx *Context, args []string) {
 	}
 
 	if len(args) < 1 {
-		fmt.Println("download subcommands: url | queue")
+		fmt.Println("download subcommands: url | queue | path")
 		fmt.Println("Run 'dlm download --help' for more information")
 		os.Exit(1)
 	}
@@ -38,6 +38,8 @@ func downloadCmd(ctx *Context, args []string) {
 	case "queue":
 		// downloadQueue(ctx, args[1:])
 		downloadQueue(ctx)
+	case "path":
+		fmt.Println(ctx.Config.OutputDir)
 	default:
 		fmt.Printf("unknown download subcommand: %s\n", args[0])
 		os.Exit(1)

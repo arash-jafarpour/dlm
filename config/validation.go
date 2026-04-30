@@ -12,6 +12,9 @@ func (c *Config) Validate() error {
 	if err := ValidateQueueFile(c.QueueFile); err != nil {
 		return err
 	}
+	if err := ValidateCompletedFile(c.CompletedFile); err != nil {
+		return err
+	}
 	if err := ValidateOutputDir(c.OutputDir); err != nil {
 		return err
 	}
@@ -45,6 +48,13 @@ func ValidateMaxRetries(retries int) error {
 func ValidateQueueFile(path string) error {
 	if path == "" {
 		return fmt.Errorf("queue_file cannot be empty")
+	}
+	return nil
+}
+
+func ValidateCompletedFile(path string) error {
+	if path == "" {
+		return fmt.Errorf("completed_file cannot be empty")
 	}
 	return nil
 }
