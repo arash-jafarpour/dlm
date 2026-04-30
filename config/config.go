@@ -78,16 +78,3 @@ func (c *Config) Save(path string) error {
 
 	return nil
 }
-
-func (c *Config) Validate() error {
-	if c.NumChunks < 1 {
-		return fmt.Errorf("num_chunks must be at least 1")
-	}
-	if c.MaxRetries < 0 {
-		return fmt.Errorf("max_retries cannot be negative")
-	}
-	if c.DialTimeout < 0 {
-		return fmt.Errorf("dial_timeout cannot be negative")
-	}
-	return nil
-}

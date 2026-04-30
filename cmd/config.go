@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"dlm/config"
 )
@@ -60,17 +61,41 @@ func setConfig(ctx *Context, key, value string) {
 
 	switch key {
 	case "queue_file":
+		if err := config.ValidateQueueFile(value); err != nil {
+			fmt.Printf("error: %v\n", err)
+			os.Exit(1)
+		}
 		ctx.Config.QueueFile = value
+
 	case "output_dir":
+		if err := config.ValidateOutputDir(value); err != nil {
+			fmt.Printf("error: %v\n", err)
+			os.Exit(1)
+		}
 		ctx.Config.OutputDir = value
+
 	case "num_chunks":
-		var chunks int
-		fmt.Sscanf(value, "%d", &chunks)
+		chunks, err := strconv.Atoi(value)
+		if err != nil {
+			fmt.Printf("error: num_chunks must be a valid integer: %v\n", err)
+			os.Exit(1)
+		}
+		if err := config.ValidateNumChunks(chunks); err != nil {
+			fmt.Printf("error: %v\n", err)
+			os.Exit(1)
+		}
 		ctx.Config.NumChunks = chunks
+
 	case "insecure_skip_verify":
+		if err := config.ValidateInsecureSkipVerify(value); err != nil {
+			fmt.Printf("error: %v\n", err)
+			os.Exit(1)
+		}
 		ctx.Config.InsecureSkipVerify = (value == "true")
+
 	default:
 		fmt.Printf("unknown config key: %s\n", key)
+		fmt.Println("valid keys: queue_file, output_dir, num_chunks, insecure_skip_verify")
 		os.Exit(1)
 	}
 
