@@ -1,6 +1,6 @@
 # DLM - Download Manager
 
-A fast, parallel download manager with queue support and persistent configuration.
+A fast, cli download manager with queue support and persistent configuration.
 
 ## Features
 
