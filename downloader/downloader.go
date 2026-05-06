@@ -59,9 +59,12 @@ func (d *Downloader) Download(urlStr string) (bool, error) {
 		if lastErr == nil {
 			return completed, nil
 		}
+		if !apperrors.IsRetryable(lastErr) {
+			return false, lastErr // permanent error, stop immediately
+		}
 		fmt.Printf("  attempt %d failed: %v\n", attempt, lastErr)
 		fmt.Println("retrying...")
-		time.Sleep(time.Duration(attempt) * 2 * time.Second) // backoff: 2s, 4s, ...
+		time.Sleep(time.Duration(attempt) * 2 * time.Second)
 	}
 	return false, lastErr
 }
@@ -115,24 +118,25 @@ func (d *Downloader) doDownload(urlStr string) (bool, error) {
 	return d.streamDownload(urlStr, fileName, totalSize)
 }
 
+func checkExistingFile(path string, expectedSize int64) (exists bool, size int64, complete bool) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, 0, false
+	}
+	return true, info.Size(), info.Size() == expectedSize
+}
+
 // chunkedDownload splits the file into numChunks parallel range requests
 func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (bool, error) {
 	fmt.Println("with method chunkedDownload")
 	output := filepath.Join(d.OutputDir, fileName)
 
-	// Check if file already exists and is complete
-	info, err := os.Stat(output)
-	if err == nil {
-		if info.Size() == totalSize {
-			fmt.Printf("%s %s\n", ui.Green("✓ file already complete:"), fileName)
-			return false, nil // skipped
-		}
+	_, currentSize, complete := checkExistingFile(output, totalSize)
+	if complete {
+		fmt.Printf("%s %s\n", ui.Green("✓ file already complete:"), fileName)
+		return false, nil
 	}
 
-	var currentSize int64
-	if info != nil {
-		currentSize = info.Size()
-	}
 	bar := ui.NewBarWithOffset(totalSize, fileName, currentSize)
 
 	chunkSize := totalSize / int64(d.NumChunks)
@@ -245,14 +249,10 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 
 	output := filepath.Join(d.OutputDir, fileName)
 
-	// Check for existing partial download
-	existingSize := int64(0)
-	if info, err := os.Stat(output); err == nil {
-		if info.Size() == totalSize {
-			fmt.Printf("%s %s\n", ui.Green("✓ file already complete:"), fileName)
-			return false, nil // skipped
-		}
-		existingSize = info.Size()
+	_, existingSize, complete := checkExistingFile(output, totalSize)
+	if complete {
+		fmt.Printf("%s %s\n", ui.Green("✓ file already complete:"), fileName)
+		return false, nil
 	}
 
 	// Now make the GET request
