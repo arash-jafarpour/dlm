@@ -33,10 +33,8 @@ func downloadCmd(ctx *Context, args []string) {
 			fmt.Println("usage: dlm download url <url> [flags]")
 			os.Exit(1)
 		}
-		// downloadURL(ctx, args[1:])
 		downloadURL(ctx, args[1])
 	case "queue":
-		// downloadQueue(ctx, args[1:])
 		downloadQueue(ctx)
 	case "path":
 		fmt.Println(ctx.Config.OutputDir)

@@ -43,6 +43,7 @@ DLM stores its files in standard system locations:
 - Configuration: `~/.config/dlm/config.json`
 - Queue file: `~/.config/dlm/queue.txt`
 - Completed list: `~/.config/dlm/completed.txt`
+- Lock file: `~/.config/dlm/dlm.lock`
 - Downloads: `~/Downloads/dlm/`
 
 All paths are customizable via the config command.

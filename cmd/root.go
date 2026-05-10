@@ -15,6 +15,13 @@ type Context struct {
 }
 
 func Execute() {
+	lock, err := acquireLock()
+	if err != nil {
+		fmt.Printf("error: %v\n", err)
+		os.Exit(1)
+	}
+	defer lock.Release()
+
 	homeDir, _ := os.UserHomeDir()
 	configPath := filepath.Join(homeDir, ".config", "dlm", "config.json")
 
