@@ -22,8 +22,8 @@ func Execute() {
 	}
 	defer lock.Release()
 
-	homeDir, _ := os.UserHomeDir()
-	configPath := filepath.Join(homeDir, ".config", "dlm", "config.json")
+	configDir, _ := os.UserConfigDir()
+	configPath := filepath.Join(configDir, "dlm", "config.json")
 
 	cfg, err := config.Load(configPath)
 	if err != nil {

@@ -56,8 +56,8 @@ func showConfig(ctx *Context) {
 }
 
 func setConfig(ctx *Context, key, value string) {
-	homeDir, _ := os.UserHomeDir()
-	configPath := filepath.Join(homeDir, ".config", "dlm", "config.json")
+	configDir, _ := os.UserConfigDir()
+	configPath := filepath.Join(configDir, "dlm", "config.json")
 
 	switch key {
 	case "queue_file":
@@ -117,8 +117,8 @@ func setConfig(ctx *Context, key, value string) {
 }
 
 func resetConfig(ctx *Context) {
-	homeDir, _ := os.UserHomeDir()
-	configPath := filepath.Join(homeDir, ".config", "dlm", "config.json")
+	configDir, _ := os.UserConfigDir()
+	configPath := filepath.Join(configDir, "dlm", "config.json")
 
 	ctx.Config = config.Default()
 
