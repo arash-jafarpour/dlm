@@ -138,6 +138,7 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 	}
 
 	bar := ui.NewBarWithOffset(totalSize, fileName, currentSize)
+	defer bar.Done()
 
 	chunkSize := totalSize / int64(d.NumChunks)
 	type result struct {
@@ -181,7 +182,7 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 		return false, apperrors.WrapChunkError(urlStr, -1, err)
 	}
 
-	fmt.Printf("%s %s\n", ui.Green("✓ saved →"), output)
+	fmt.Printf("\n%s %s\n", ui.Green("✓ saved →"), output)
 	return true, nil // actually completed
 }
 
@@ -290,12 +291,13 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 	defer f.Close()
 
 	bar := ui.NewBarWithOffset(totalSize, fileName, existingSize)
+	defer bar.Done()
 
 	if err := copyToFile(resp.Body, f, bar, urlStr, output); err != nil {
 		return false, err
 	}
 
-	fmt.Printf("%s %s\n", ui.Green("✓ saved →"), output)
+	fmt.Printf("\n%s %s\n", ui.Green("✓ saved →"), output)
 	return true, nil
 }
 

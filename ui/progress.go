@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-const maxLabelWidth = 64
+const (
+	maxLabelWidth = 64
+	barWidth      = 40
+)
 
 type Bar struct {
 	total     int64
@@ -17,31 +20,43 @@ type Bar struct {
 	label     string
 	startTime time.Time
 	mu        sync.Mutex
+	done      chan struct{}
 }
 
 func NewBar(total int64, label string) *Bar {
-	return &Bar{
-		total:     total,
-		width:     40,
-		label:     normalizeLabel(label),
-		startTime: time.Now(),
-	}
+	return NewBarWithOffset(total, label, 0)
 }
 
 func NewBarWithOffset(total int64, label string, offset int64) *Bar {
 	b := &Bar{
 		total:     total,
-		width:     40,
+		width:     barWidth,
 		label:     normalizeLabel(label),
 		startTime: time.Now(),
+		done:      make(chan struct{}),
 	}
 	b.current.Store(offset)
+	go b.listen()
 	return b
 }
 
 func (b *Bar) Add(n int) {
 	b.current.Add(int64(n))
-	b.render()
+}
+
+func (b *Bar) listen() {
+	// Update the UI 10 times per second (100ms)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			b.render()
+		case <-b.done:
+			return
+		}
+	}
 }
 
 func (b *Bar) render() {
@@ -70,6 +85,10 @@ func (b *Bar) render() {
 		eta = " ETA " + formatETA(etaSeconds)
 	}
 
+	if filled > b.width {
+		filled = b.width
+	}
+
 	filledBar := Green(strings.Repeat("█", filled))
 	emptyBar := Gray(strings.Repeat("░", b.width-filled))
 	bar := filledBar + emptyBar
@@ -84,18 +103,12 @@ func (b *Bar) render() {
 		eta,
 	)
 
-	// Pad to 120 chars to clear previous line artifacts
 	fmt.Printf("%-120s", line)
-
-	if current >= b.total && b.total > 0 {
-		fmt.Println()
-	}
 }
 
 func (b *Bar) Done() {
-	if b.current.Load() >= b.total && b.total > 0 {
-		fmt.Println()
-	}
+	close(b.done)
+	fmt.Println()
 }
 
 func normalizeLabel(label string) string {
