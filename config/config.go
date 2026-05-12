@@ -31,7 +31,10 @@ func Default() *Config {
 	}
 
 	downloadsDir := filepath.Join(homeDir, "Downloads", "dlm")
-	configDir := filepath.Join(homeDir, ".config")
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		configDir = "."
+	}
 	queueFilePath := filepath.Join(configDir, "queue.txt")
 	completedFilePath := filepath.Join(configDir, "completed.txt")
 
