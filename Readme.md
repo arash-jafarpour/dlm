@@ -50,7 +50,7 @@ All paths are customizable via the config command.
 
 ## Commands
 
-### Downlaod
+### Download
 
 Download a single URL:
 
