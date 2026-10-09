@@ -4,46 +4,86 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
+	"strings"
 
 	"dlm/config"
+
+	"github.com/spf13/cobra"
 )
 
-func configCmd(ctx *Context, args []string) {
-	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
-		if len(args) > 1 {
-			generateCommandUsage([]string{"config", args[1]})
-		} else {
-			generateCommandUsage([]string{"config"})
-		}
-		return
+var configKeys = []string{
+	"queue_file",
+	"completed_file",
+	"output_dir",
+	"num_chunks",
+	"insecure_skip_verify",
+}
+
+func newConfigCmd(ctx *Context) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "Manage configuration",
 	}
 
-	if len(args) < 1 {
-		fmt.Println("config subcommands: show | set | path | reset")
-		fmt.Println("Run 'dlm config --help' for more information")
-		os.Exit(1)
-	}
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "show",
+			Short: "Show current configuration",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				showConfig(ctx)
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:               "set <key> <value>",
+			Short:             "Set configuration value",
+			Args:              cobra.ExactArgs(2),
+			ValidArgsFunction: completeConfigSet,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				setConfig(ctx, args[0], args[1])
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "path",
+			Short: "Show configuration file path",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				path, err := configPath()
+				if err != nil {
+					return err
+				}
+				fmt.Println(path)
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "reset",
+			Short: "Resets to default configuration",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				resetConfig(ctx)
+				return nil
+			},
+		},
+	)
 
-	switch args[0] {
-	case "show":
-		showConfig(ctx)
-	case "set":
-		if len(args) < 3 {
-			fmt.Println("usage: dlm config set <key> <value>")
-			os.Exit(1)
-		}
-		setConfig(ctx, args[1], args[2])
-	case "reset":
-		resetConfig(ctx)
-	case "path":
-		homeDir, _ := os.UserHomeDir()
-		fmt.Println(filepath.Join(homeDir, ".config", "dlm", "config.json"))
-	default:
-		fmt.Printf("unknown config subcommand: %s\n", args[0])
-		os.Exit(1)
+	return cmd
+}
+
+// completeConfigSet offers config keys for the first argument and, for
+// insecure_skip_verify, its boolean values for the second.
+func completeConfigSet(
+	cmd *cobra.Command,
+	args []string,
+	toComplete string,
+) ([]string, cobra.ShellCompDirective) {
+	if len(args) == 0 {
+		return configKeys, cobra.ShellCompDirectiveNoFileComp
 	}
+	if len(args) == 1 && args[0] == "insecure_skip_verify" {
+		return []string{"true", "false"}, cobra.ShellCompDirectiveNoFileComp
+	}
+	return nil, cobra.ShellCompDirectiveNoFileComp
 }
 
 func showConfig(ctx *Context) {
@@ -56,8 +96,11 @@ func showConfig(ctx *Context) {
 }
 
 func setConfig(ctx *Context, key, value string) {
-	configDir, _ := os.UserConfigDir()
-	configPath := filepath.Join(configDir, "dlm", "config.json")
+	cfgPath, err := configPath()
+	if err != nil {
+		fmt.Printf("error: %v\n", err)
+		os.Exit(1)
+	}
 
 	switch key {
 	case "queue_file":
@@ -102,13 +145,11 @@ func setConfig(ctx *Context, key, value string) {
 
 	default:
 		fmt.Printf("unknown config key: %s\n", key)
-		fmt.Println(
-			"valid keys: queue_file, completed_file, output_dir, num_chunks, insecure_skip_verify",
-		)
+		fmt.Printf("valid keys: %s\n", strings.Join(configKeys, ", "))
 		os.Exit(1)
 	}
 
-	if err := ctx.Config.Save(configPath); err != nil {
+	if err := ctx.Config.Save(cfgPath); err != nil {
 		fmt.Printf("error saving config: %v\n", err)
 		os.Exit(1)
 	}
@@ -117,12 +158,15 @@ func setConfig(ctx *Context, key, value string) {
 }
 
 func resetConfig(ctx *Context) {
-	configDir, _ := os.UserConfigDir()
-	configPath := filepath.Join(configDir, "dlm", "config.json")
+	cfgPath, err := configPath()
+	if err != nil {
+		fmt.Printf("error: %v\n", err)
+		os.Exit(1)
+	}
 
 	ctx.Config = config.Default()
 
-	if err := ctx.Config.Save(configPath); err != nil {
+	if err := ctx.Config.Save(cfgPath); err != nil {
 		fmt.Printf("error saving config: %v\n", err)
 		os.Exit(1)
 	}

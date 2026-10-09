@@ -7,41 +7,54 @@ import (
 
 	"dlm/reader"
 	"dlm/ui"
+
+	"github.com/spf13/cobra"
 )
 
-func queueCmd(ctx *Context, args []string) {
-	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
-		if len(args) > 1 {
-			generateCommandUsage([]string{"queue", args[1]})
-		} else {
-			generateCommandUsage([]string{"queue"})
-		}
-		return
+func newQueueCmd(ctx *Context) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "queue",
+		Short: "Manage download queue",
 	}
 
-	if len(args) < 1 {
-		fmt.Println("queue subcommands: add, list, clear, path")
-		fmt.Println("Run 'dlm queue --help' for more information")
-		os.Exit(1)
-	}
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:               "add <url>",
+			Short:             "Add a URL to the queue",
+			Args:              cobra.ExactArgs(1),
+			ValidArgsFunction: noFileCompletion,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				queueAdd(ctx, args[0])
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "list",
+			Short: "List all URLs in the queue",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				queueList(ctx)
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "clear",
+			Short: "Clear all URLs from the queue",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				queueClear(ctx)
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "path",
+			Short: "Show queue file path",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				fmt.Println(ctx.Config.QueueFile)
+				return nil
+			},
+		},
+	)
 
-	switch args[0] {
-	case "add":
-		if len(args) < 2 {
-			fmt.Println("usage: dlm queue add <url>")
-			os.Exit(1)
-		}
-		queueAdd(ctx, args[1])
-	case "list":
-		queueList(ctx)
-	case "clear":
-		queueClear(ctx)
-	case "path":
-		fmt.Println(ctx.Config.QueueFile)
-	default:
-		fmt.Printf("unknown queue subcommand: %s\n", args[0])
-		os.Exit(1)
-	}
+	return cmd
 }
 
 func queueAdd(ctx *Context, url string) {

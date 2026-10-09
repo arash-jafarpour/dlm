@@ -8,40 +8,46 @@ import (
 
 	"dlm/reader"
 	"dlm/ui"
+
+	"github.com/spf13/cobra"
 )
 
-func downloadCmd(ctx *Context, args []string) {
-	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
-		if len(args) > 1 {
-			generateCommandUsage([]string{"download", args[1]})
-		} else {
-			generateCommandUsage([]string{"download"})
-		}
-		return
+func newDownloadCmd(ctx *Context) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "download",
+		Short: "Download files",
 	}
 
-	if len(args) < 1 {
-		fmt.Println("download subcommands: url | queue | path")
-		fmt.Println("Run 'dlm download --help' for more information")
-		os.Exit(1)
-	}
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:               "url <url>",
+			Short:             "Download a single URL",
+			Args:              cobra.ExactArgs(1),
+			ValidArgsFunction: noFileCompletion,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				downloadURL(ctx, args[0])
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "queue",
+			Short: "Download all URLs from the queue",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				downloadQueue(ctx)
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "path",
+			Short: "Show output directory path",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				fmt.Println(ctx.Config.OutputDir)
+				return nil
+			},
+		},
+	)
 
-	switch args[0] {
-	case "url":
-		if len(args) < 2 {
-			// fmt.Println("usage: dlm download url <url>")
-			fmt.Println("usage: dlm download url <url> [flags]")
-			os.Exit(1)
-		}
-		downloadURL(ctx, args[1])
-	case "queue":
-		downloadQueue(ctx)
-	case "path":
-		fmt.Println(ctx.Config.OutputDir)
-	default:
-		fmt.Printf("unknown download subcommand: %s\n", args[0])
-		os.Exit(1)
-	}
+	return cmd
 }
 
 func downloadURL(ctx *Context, url string) {

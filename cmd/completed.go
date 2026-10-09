@@ -5,33 +5,36 @@ import (
 	"os"
 
 	"dlm/ui"
+
+	"github.com/spf13/cobra"
 )
 
-func completedCmd(ctx *Context, args []string) {
-	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
-		if len(args) > 1 {
-			generateCommandUsage([]string{"completed", args[1]})
-		} else {
-			generateCommandUsage([]string{"completed"})
-		}
-		return
+func newCompletedCmd(ctx *Context) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "completed",
+		Short: "Manage completed downloads",
 	}
 
-	if len(args) < 1 {
-		fmt.Println("completed subcommands: clear, path")
-		fmt.Println("Run 'dlm completed --help' for more information")
-		os.Exit(1)
-	}
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "clear",
+			Short: "Clear completed downloads list",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				completedClear(ctx)
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "path",
+			Short: "Show completed file path",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				fmt.Println(ctx.Config.CompletedFile)
+				return nil
+			},
+		},
+	)
 
-	switch args[0] {
-	case "clear":
-		completedClear(ctx)
-	case "path":
-		fmt.Println(ctx.Config.CompletedFile)
-	default:
-		fmt.Printf("unknown completed subcommand: %s\n", args[0])
-		os.Exit(1)
-	}
+	return cmd
 }
 
 func completedClear(ctx *Context) {

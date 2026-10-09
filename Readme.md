@@ -20,6 +20,46 @@ go build -o dlm
 sudo mv ./dlm /usr/local/bin/
 ```
 
+## Shell Completion
+
+DLM ships with shell completion for bash, zsh, fish, and powershell.
+
+`make build` automatically installs the completion script for your current
+`$SHELL` (bash, zsh, or fish) into its standard completion directory. The
+commands below set it up manually or for other shells.
+
+Load completions for the current session:
+
+```bash
+# bash
+source <(dlm completion bash)
+
+# zsh
+source <(dlm completion zsh)
+
+# fish
+dlm completion fish | source
+
+# powershell
+dlm completion powershell | Out-String | Invoke-Expression
+```
+
+Install completions so they load automatically in new sessions:
+
+```bash
+# bash
+dlm completion bash > ~/.local/share/bash-completion/completions/dlm
+
+# zsh
+dlm completion zsh > "${fpath[1]}/_dlm"
+
+# fish
+dlm completion fish > ~/.config/fish/completions/dlm.fish
+```
+
+Completion covers commands and subcommands, and suggests valid keys for
+`dlm config set` (including `true`/`false` for `insecure_skip_verify`).
+
 ## Quick Start
 
 Download a single file:
