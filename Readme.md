@@ -230,6 +230,15 @@ Reset to default configuration:
 dlm config reset
 ```
 
+### Version
+
+Show the current version and build metadata:
+
+```bash
+dlm version
+dlm --version
+```
+
 ## Configuration Options
 
 | Key                    | Type     | Default                       | Description                               |

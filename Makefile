@@ -1,11 +1,16 @@
 .PHONY: build install completion run
 
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -X dlm/cmd.version=$(VERSION) -X dlm/cmd.commit=$(COMMIT) -X dlm/cmd.date=$(DATE)
+
 build:
-	@go build -o dlm
+	@go build -ldflags "$(LDFLAGS)" -o dlm
 	@$(MAKE) --no-print-directory completion
 
 install: build
-	@go install .
+	@go install -ldflags "$(LDFLAGS)" .
 	@echo "installed $$(go env GOBIN)/dlm"
 
 # Install shell completion for the current $SHELL (bash, zsh, or fish) into the

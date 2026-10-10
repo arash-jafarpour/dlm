@@ -53,6 +53,7 @@ func newRootCmd(state *appState) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "dlm",
 		Short:         "Download Manager - A powerful download utility",
+		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -60,9 +61,9 @@ func newRootCmd(state *appState) *cobra.Command {
 			return errNoCommand
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// Shell completion and help must never contend for the download lock
-			// or require a valid config.
-			if cmd.Name() == "help" || isShellCompletionCmd(cmd) {
+			// Shell completion, help, and version must never contend for the
+			// download lock or require a valid config.
+			if cmd.Name() == "help" || cmd.Name() == "version" || isShellCompletionCmd(cmd) {
 				return nil
 			}
 
@@ -98,6 +99,7 @@ func newRootCmd(state *appState) *cobra.Command {
 		newDownloadCmd(state.ctx),
 		newCompletedCmd(state.ctx),
 		newConfigCmd(state.ctx),
+		newVersionCmd(),
 	)
 
 	return root
