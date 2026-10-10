@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 type LockFile struct {
@@ -29,8 +28,7 @@ func acquireLock() (*LockFile, error) {
 		return nil, fmt.Errorf("failed to open lock file: %w", err)
 	}
 
-	err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if err != nil {
+	if err := flockExclusive(file); err != nil {
 		file.Close()
 		return nil, fmt.Errorf("another instance of dlm is already running")
 	}
@@ -50,7 +48,7 @@ func (lf *LockFile) Release() error {
 		return nil
 	}
 
-	syscall.Flock(int(lf.file.Fd()), syscall.LOCK_UN)
+	funlock(lf.file)
 
 	if err := lf.file.Close(); err != nil {
 		return err

@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"dlm/config"
+	"github.com/arash-jafarpour/dlm/config"
 )
 
 func TestCompletedClear(t *testing.T) {

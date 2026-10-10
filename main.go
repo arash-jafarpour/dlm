@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"dlm/cmd"
+	"github.com/arash-jafarpour/dlm/cmd"
 )
 
 func main() {

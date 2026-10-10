@@ -239,6 +239,26 @@ dlm version
 dlm --version
 ```
 
+### Update
+
+Update `dlm` in place to the latest GitHub release:
+
+```bash
+dlm update
+```
+
+Check whether a newer version exists without installing it:
+
+```bash
+dlm update --check
+```
+
+Self-update downloads the release asset matching your OS and architecture,
+verifies its SHA256 checksum, and replaces the running binary. If `dlm` is
+installed in a system directory, run the update with elevated permissions or
+reinstall. Releases are published automatically by GoReleaser when a `v*` tag
+is pushed.
+
 ## Configuration Options
 
 | Key                    | Type     | Default                       | Description                               |

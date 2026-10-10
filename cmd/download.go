@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"dlm/reader"
-	"dlm/ui"
+	"github.com/arash-jafarpour/dlm/reader"
+	"github.com/arash-jafarpour/dlm/ui"
 
 	"github.com/spf13/cobra"
 )

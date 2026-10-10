@@ -3,7 +3,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -X dlm/cmd.version=$(VERSION) -X dlm/cmd.commit=$(COMMIT) -X dlm/cmd.date=$(DATE)
+LDFLAGS := -X github.com/arash-jafarpour/dlm/cmd.version=$(VERSION) -X github.com/arash-jafarpour/dlm/cmd.commit=$(COMMIT) -X github.com/arash-jafarpour/dlm/cmd.date=$(DATE)
 
 build:
 	@go build -ldflags "$(LDFLAGS)" -o dlm

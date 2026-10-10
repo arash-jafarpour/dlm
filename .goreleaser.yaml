@@ -1,0 +1,42 @@
+version: 2
+
+project_name: dlm
+
+builds:
+  - id: dlm
+    main: .
+    binary: dlm
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/arash-jafarpour/dlm/cmd.version={{ .Version }}
+      - -X github.com/arash-jafarpour/dlm/cmd.commit={{ .Commit }}
+      - -X github.com/arash-jafarpour/dlm/cmd.date={{ .Date }}
+
+archives:
+  - id: dlm
+    # Must stay "{cmd}_{goos}_{goarch}" so the self-updater can find assets.
+    # e.g. dlm_linux_amd64.tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  # Emit one "<asset>.sha256" per artifact; the updater's SHA2Validator
+  # looks for exactly that naming before applying an update.
+  split: true
+
+release:
+  draft: false

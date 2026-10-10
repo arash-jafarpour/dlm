@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"dlm/config"
-	apperrors "dlm/errors"
-	"dlm/ui"
+	"github.com/arash-jafarpour/dlm/config"
+	apperrors "github.com/arash-jafarpour/dlm/errors"
+	"github.com/arash-jafarpour/dlm/ui"
 )
 
 type Downloader struct {

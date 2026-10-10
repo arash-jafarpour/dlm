@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"dlm/config"
-	"dlm/downloader"
+	"github.com/arash-jafarpour/dlm/config"
+	"github.com/arash-jafarpour/dlm/downloader"
 
 	"github.com/spf13/cobra"
 )
@@ -63,7 +63,8 @@ func newRootCmd(state *appState) *cobra.Command {
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Shell completion, help, and version must never contend for the
 			// download lock or require a valid config.
-			if cmd.Name() == "help" || cmd.Name() == "version" || isShellCompletionCmd(cmd) {
+			if cmd.Name() == "help" || cmd.Name() == "version" || cmd.Name() == "update" ||
+				isShellCompletionCmd(cmd) {
 				return nil
 			}
 
@@ -100,6 +101,7 @@ func newRootCmd(state *appState) *cobra.Command {
 		newCompletedCmd(state.ctx),
 		newConfigCmd(state.ctx),
 		newVersionCmd(),
+		newUpdateCmd(),
 	)
 
 	return root

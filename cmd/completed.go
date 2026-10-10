@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"dlm/ui"
+	"github.com/arash-jafarpour/dlm/ui"
 
 	"github.com/spf13/cobra"
 )

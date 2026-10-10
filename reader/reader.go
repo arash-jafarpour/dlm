@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	apperrors "dlm/errors"
+	apperrors "github.com/arash-jafarpour/dlm/errors"
 )
 
 type LinkFile struct {

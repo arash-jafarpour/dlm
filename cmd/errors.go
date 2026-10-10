@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	apperrors "dlm/errors"
-	"dlm/ui"
+	apperrors "github.com/arash-jafarpour/dlm/errors"
+	"github.com/arash-jafarpour/dlm/ui"
 )
 
 func logError(err error) {

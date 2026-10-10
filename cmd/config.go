@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"dlm/config"
+	"github.com/arash-jafarpour/dlm/config"
 
 	"github.com/spf13/cobra"
 )

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"dlm/config"
+	"github.com/arash-jafarpour/dlm/config"
 )
 
 func TestQueueAdd(t *testing.T) {
