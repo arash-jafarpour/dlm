@@ -13,11 +13,38 @@ A fast, cli download manager with queue support and persistent configuration.
 
 ## Installation
 
+### Download a prebuilt release
+
+Grab the archive for your OS and architecture from the
+[latest release](https://github.com/arash-jafarpour/dlm/releases/latest),
+extract it, and put `dlm` on your `PATH`:
+
+```bash
+# example: Linux amd64
+tar -xzf dlm_linux_amd64.tar.gz
+sudo mv dlm /usr/local/bin/
+```
+
+Once installed, keep `dlm` up to date with the built-in updater:
+
+```bash
+dlm update
+```
+
+### Build from source
+
+Requires Go 1.25 or newer:
+
 ```bash
 git clone https://github.com/arash-jafarpour/dlm
 cd dlm
-go build -o dlm
-sudo mv ./dlm /usr/local/bin/
+make install   # go install + shell completion
+```
+
+Or build a local binary without installing it:
+
+```bash
+make build     # produces ./dlm
 ```
 
 ## Shell Completion
