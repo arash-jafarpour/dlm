@@ -23,7 +23,9 @@ func TestQueueAdd(t *testing.T) {
 	}
 
 	// Add a URL
-	queueAdd(ctx, "https://example.com")
+	if err := queueAdd(ctx, "https://example.com"); err != nil {
+		t.Fatalf("queueAdd failed: %v", err)
+	}
 
 	// Verify it was written
 	content, err := os.ReadFile(tmpFile.Name())
@@ -55,7 +57,9 @@ func TestQueueList(t *testing.T) {
 	ctx := &Context{
 		Config: cfg,
 	}
-	queueList(ctx)
+	if err := queueList(ctx); err != nil {
+		t.Fatalf("queueList failed: %v", err)
+	}
 }
 
 func TestQueueClear(t *testing.T) {
@@ -77,7 +81,9 @@ func TestQueueClear(t *testing.T) {
 		Config: cfg,
 	}
 
-	queueClearWithConfirm(ctx, false) // Skip confirmation
+	if err := queueClearWithConfirm(ctx, false); err != nil { // Skip confirmation
+		t.Fatalf("queueClearWithConfirm failed: %v", err)
+	}
 
 	// Verify file is empty
 	content, err := os.ReadFile(tmpFile.Name())

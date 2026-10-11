@@ -29,7 +29,9 @@ func TestCompletedClear(t *testing.T) {
 	}
 
 	// Call completedClear
-	completedClear(ctx)
+	if err := completedClear(ctx); err != nil {
+		t.Fatalf("completedClear failed: %v", err)
+	}
 
 	// Verify the file is now empty
 	content, err := os.ReadFile(tmpFile.Name())

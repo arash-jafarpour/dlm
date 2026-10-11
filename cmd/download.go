@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -25,16 +26,14 @@ func newDownloadCmd(ctx *Context) *cobra.Command {
 			Args:              cobra.ExactArgs(1),
 			ValidArgsFunction: noFileCompletion,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				downloadURL(ctx, args[0])
-				return nil
+				return downloadURL(ctx, args[0])
 			},
 		},
 		&cobra.Command{
 			Use:   "queue",
 			Short: "Download all URLs from the queue",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				downloadQueue(ctx)
-				return nil
+				return downloadQueue(ctx)
 			},
 		},
 		&cobra.Command{
@@ -50,37 +49,35 @@ func newDownloadCmd(ctx *Context) *cobra.Command {
 	return cmd
 }
 
-func downloadURL(ctx *Context, url string) {
+func downloadURL(ctx *Context, url string) error {
 	url = strings.TrimSpace(url)
 	if url == "" {
-		fmt.Println("error: URL cannot be empty")
-		os.Exit(1)
+		return errors.New("URL cannot be empty")
 	}
 
-	fmt.Printf("%s", ui.Cyan("→ downloading "))
+	fmt.Printf("%s", ui.Cyan("→ downloading\n"))
 	completed, err := ctx.Downloader.Download(url)
 	if err != nil {
-		logError(err)
-		os.Exit(1)
+		return err
 	}
 	if completed {
 		fmt.Printf("%s\n", ui.Green("✓ done"))
 	}
+	return nil
 }
 
-func downloadQueue(ctx *Context) {
+func downloadQueue(ctx *Context) error {
 	lf, err := reader.ReadLinks(ctx.Config.QueueFile)
 	if err != nil {
-		logError(err)
-		os.Exit(1)
+		return err
 	}
 	if len(lf.Links) == 0 {
 		fmt.Println("no links found in queue")
-		return
+		return nil
 	}
 
 	for _, urlStr := range lf.Links {
-		fmt.Printf("%s", ui.Cyan("→ downloading "))
+		fmt.Printf("%s", ui.Cyan("→ downloading\n"))
 
 		completed, err := ctx.Downloader.Download(urlStr)
 		if err != nil {
@@ -97,6 +94,7 @@ func downloadQueue(ctx *Context) {
 			}
 		}
 	}
+	return nil
 }
 
 func markCompleted(ctx *Context, urlStr string) error {

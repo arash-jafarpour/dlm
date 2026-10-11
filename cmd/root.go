@@ -89,7 +89,7 @@ func newRootCmd(state *appState) *cobra.Command {
 			}
 
 			state.ctx.Config = cfg
-			state.ctx.Downloader = downloader.New(cfg)
+			state.ctx.Downloader = downloader.New(cfg, cliReporter{})
 
 			return nil
 		},

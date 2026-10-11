@@ -3,7 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -31,8 +30,7 @@ func newConfigCmd(ctx *Context) *cobra.Command {
 			Use:   "show",
 			Short: "Show current configuration",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				showConfig(ctx)
-				return nil
+				return showConfig(ctx)
 			},
 		},
 		&cobra.Command{
@@ -41,8 +39,7 @@ func newConfigCmd(ctx *Context) *cobra.Command {
 			Args:              cobra.ExactArgs(2),
 			ValidArgsFunction: completeConfigSet,
 			RunE: func(cmd *cobra.Command, args []string) error {
-				setConfig(ctx, args[0], args[1])
-				return nil
+				return setConfig(ctx, args[0], args[1])
 			},
 		},
 		&cobra.Command{
@@ -61,8 +58,7 @@ func newConfigCmd(ctx *Context) *cobra.Command {
 			Use:   "reset",
 			Short: "Resets to default configuration",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				resetConfig(ctx)
-				return nil
+				return resetConfig(ctx)
 			},
 		},
 	)
@@ -86,90 +82,80 @@ func completeConfigSet(
 	return nil, cobra.ShellCompDirectiveNoFileComp
 }
 
-func showConfig(ctx *Context) {
+func showConfig(ctx *Context) error {
 	data, err := json.MarshalIndent(ctx.Config, "", "  ")
 	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to encode config: %w", err)
 	}
 	fmt.Println(string(data))
+	return nil
 }
 
-func setConfig(ctx *Context, key, value string) {
+func setConfig(ctx *Context, key, value string) error {
 	cfgPath, err := configPath()
 	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	switch key {
 	case "queue_file":
 		if err := config.ValidateQueueFile(value); err != nil {
-			fmt.Printf("error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		ctx.Config.QueueFile = value
 
 	case "completed_file":
 		if err := config.ValidateCompletedFile(value); err != nil {
-			fmt.Printf("error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		ctx.Config.CompletedFile = value
 
 	case "output_dir":
 		if err := config.ValidateOutputDir(value); err != nil {
-			fmt.Printf("error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		ctx.Config.OutputDir = value
 
 	case "num_chunks":
 		chunks, err := strconv.Atoi(value)
 		if err != nil {
-			fmt.Printf("error: num_chunks must be a valid integer: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("num_chunks must be a valid integer: %w", err)
 		}
 		if err := config.ValidateNumChunks(chunks); err != nil {
-			fmt.Printf("error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		ctx.Config.NumChunks = chunks
 
 	case "insecure_skip_verify":
 		if err := config.ValidateInsecureSkipVerify(value); err != nil {
-			fmt.Printf("error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		ctx.Config.InsecureSkipVerify = (value == "true")
 
 	default:
-		fmt.Printf("unknown config key: %s\n", key)
-		fmt.Printf("valid keys: %s\n", strings.Join(configKeys, ", "))
-		os.Exit(1)
+		return fmt.Errorf("unknown config key %q (valid keys: %s)", key, strings.Join(configKeys, ", "))
 	}
 
 	if err := ctx.Config.Save(cfgPath); err != nil {
-		fmt.Printf("error saving config: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to save config: %w", err)
 	}
 
 	fmt.Printf("config updated: %s = %s\n", key, value)
+	return nil
 }
 
-func resetConfig(ctx *Context) {
+func resetConfig(ctx *Context) error {
 	cfgPath, err := configPath()
 	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	ctx.Config = config.Default()
 
 	if err := ctx.Config.Save(cfgPath); err != nil {
-		fmt.Printf("error saving config: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to save config: %w", err)
 	}
 
 	fmt.Println("config reset to defaults")
+	return nil
 }

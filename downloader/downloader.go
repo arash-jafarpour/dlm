@@ -15,7 +15,6 @@ import (
 
 	"github.com/arash-jafarpour/dlm/config"
 	apperrors "github.com/arash-jafarpour/dlm/errors"
-	"github.com/arash-jafarpour/dlm/ui"
 )
 
 type Downloader struct {
@@ -23,6 +22,9 @@ type Downloader struct {
 	NumChunks  int
 	MaxRetries int
 	Client     *http.Client
+	// Reporter receives lifecycle notifications and progress callbacks. New
+	// installs a no-op default when it is nil.
+	Reporter Reporter
 }
 
 func buildHTTPClient(cfg *config.Config) *http.Client {
@@ -42,12 +44,16 @@ func buildHTTPClient(cfg *config.Config) *http.Client {
 	return &http.Client{Timeout: 0, Transport: transport}
 }
 
-func New(cfg *config.Config) *Downloader {
+func New(cfg *config.Config, rep Reporter) *Downloader {
+	if rep == nil {
+		rep = noopReporter{}
+	}
 	return &Downloader{
 		OutputDir:  cfg.OutputDir,
 		NumChunks:  cfg.NumChunks,
 		MaxRetries: cfg.MaxRetries,
 		Client:     buildHTTPClient(cfg),
+		Reporter:   rep,
 	}
 }
 
@@ -62,8 +68,7 @@ func (d *Downloader) Download(urlStr string) (bool, error) {
 		if !apperrors.IsRetryable(lastErr) {
 			return false, lastErr // permanent error, stop immediately
 		}
-		fmt.Printf("  attempt %d failed: %v\n", attempt, lastErr)
-		fmt.Println("retrying...")
+		d.Reporter.Retry(attempt, lastErr)
 		time.Sleep(time.Duration(attempt) * 2 * time.Second)
 	}
 	return false, lastErr
@@ -128,16 +133,15 @@ func checkExistingFile(path string, expectedSize int64) (exists bool, size int64
 
 // chunkedDownload splits the file into numChunks parallel range requests
 func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (bool, error) {
-	fmt.Println("with method chunkedDownload")
 	output := filepath.Join(d.OutputDir, fileName)
 
 	_, currentSize, complete := checkExistingFile(output, totalSize)
 	if complete {
-		fmt.Printf("%s %s\n", ui.Green("✓ file already complete:"), fileName)
+		d.Reporter.AlreadyComplete(fileName)
 		return false, nil
 	}
 
-	bar := ui.NewBarWithOffset(totalSize, fileName, currentSize)
+	bar := d.Reporter.Progress(totalSize, fileName, currentSize)
 	defer bar.Done()
 
 	chunkSize := totalSize / int64(d.NumChunks)
@@ -182,7 +186,7 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 		return false, apperrors.WrapChunkError(urlStr, -1, err)
 	}
 
-	fmt.Printf("\n%s %s\n", ui.Green("✓ saved →"), output)
+	d.Reporter.Saved(output)
 	return true, nil // actually completed
 }
 
@@ -191,7 +195,7 @@ func (d *Downloader) downloadChunk(
 	urlStr string,
 	start, end int64,
 	path string,
-	bar *ui.Bar,
+	bar ProgressBar,
 ) error {
 	// Check if chunk already exists and adjust range
 	existingSize := int64(0)
@@ -246,13 +250,11 @@ func (d *Downloader) downloadChunk(
 
 // streamDownload is the fallback single-stream path
 func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (bool, error) {
-	fmt.Println("with method streamDownload")
-
 	output := filepath.Join(d.OutputDir, fileName)
 
 	_, existingSize, complete := checkExistingFile(output, totalSize)
 	if complete {
-		fmt.Printf("%s %s\n", ui.Green("✓ file already complete:"), fileName)
+		d.Reporter.AlreadyComplete(fileName)
 		return false, nil
 	}
 
@@ -290,14 +292,14 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 	}
 	defer f.Close()
 
-	bar := ui.NewBarWithOffset(totalSize, fileName, existingSize)
+	bar := d.Reporter.Progress(totalSize, fileName, existingSize)
 	defer bar.Done()
 
 	if err := copyToFile(resp.Body, f, bar, urlStr, output); err != nil {
 		return false, err
 	}
 
-	fmt.Printf("\n%s %s\n", ui.Green("✓ saved →"), output)
+	d.Reporter.Saved(output)
 	return true, nil
 }
 
@@ -325,7 +327,7 @@ func mergeFiles(dst string, tmpFiles []string) error {
 }
 
 // copyToFile reads from r and writes to f, updating bar. Returns any read/write error.
-func copyToFile(r io.Reader, f *os.File, bar *ui.Bar, urlStr, path string) error {
+func copyToFile(r io.Reader, f *os.File, bar ProgressBar, urlStr, path string) error {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := r.Read(buf)

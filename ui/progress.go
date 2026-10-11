@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,10 @@ type Bar struct {
 	startTime time.Time
 	mu        sync.Mutex
 	done      chan struct{}
+	// term records whether stdout is a real terminal. The bar only
+	// redraws (\r-based updates) when it can; on pipes, redirects, and
+	// non-interactive runs it stays silent so the output stays usable.
+	term bool
 }
 
 func NewBar(total int64, label string) *Bar {
@@ -28,16 +33,30 @@ func NewBar(total int64, label string) *Bar {
 }
 
 func NewBarWithOffset(total int64, label string, offset int64) *Bar {
+	term := isTerminal(os.Stdout)
 	b := &Bar{
 		total:     total,
 		width:     barWidth,
 		label:     normalizeLabel(label),
 		startTime: time.Now(),
 		done:      make(chan struct{}),
+		term:      term,
 	}
 	b.current.Store(offset)
-	go b.listen()
+	if term {
+		go b.listen()
+	}
 	return b
+}
+
+// isTerminal reports whether f is attached to a character device (i.e. a
+// terminal that can handle carriage-return redraws).
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 func (b *Bar) Add(n int) {
@@ -108,7 +127,9 @@ func (b *Bar) render() {
 
 func (b *Bar) Done() {
 	close(b.done)
-	fmt.Println()
+	if b.term {
+		fmt.Println()
+	}
 }
 
 func normalizeLabel(label string) string {

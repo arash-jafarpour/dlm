@@ -20,8 +20,7 @@ func newCompletedCmd(ctx *Context) *cobra.Command {
 			Use:   "clear",
 			Short: "Clear completed downloads list",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				completedClear(ctx)
-				return nil
+				return completedClear(ctx)
 			},
 		},
 		&cobra.Command{
@@ -37,10 +36,10 @@ func newCompletedCmd(ctx *Context) *cobra.Command {
 	return cmd
 }
 
-func completedClear(ctx *Context) {
+func completedClear(ctx *Context) error {
 	if err := os.WriteFile(ctx.Config.CompletedFile, []byte(""), 0o644); err != nil {
-		fmt.Printf("%s %v\n", ui.Red("✗ failed to clear completed:"), err)
-		os.Exit(1)
+		return fmt.Errorf("failed to clear completed: %w", err)
 	}
 	fmt.Printf("%s\n", ui.Green("✓ completed list cleared"))
+	return nil
 }
