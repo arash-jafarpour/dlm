@@ -76,7 +76,12 @@ func downloadQueue(ctx *Context) error {
 		return nil
 	}
 
-	for _, urlStr := range lf.Links {
+	for i, urlStr := range lf.Links {
+		// A blank line separates one file's result block from the next
+		// download, for readability in queue mode.
+		if i > 0 {
+			fmt.Println()
+		}
 		fmt.Printf("%s", ui.Cyan("→ downloading\n"))
 
 		completed, err := ctx.Downloader.Download(urlStr)

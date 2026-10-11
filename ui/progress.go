@@ -25,7 +25,16 @@ type Bar struct {
 	// term records whether stdout is a real terminal. The bar only
 	// redraws (\r-based updates) when it can; on pipes, redirects, and
 	// non-interactive runs it stays silent so the output stays usable.
+	// term records whether stdout is a real terminal. The bar only
+	// redraws (\r-based updates) when it can; on pipes, redirects, and
+	// non-interactive runs it stays silent so the output stays usable.
 	term bool
+	// wg tracks the listen goroutine so Done can wait for the final render.
+	wg sync.WaitGroup
+	// finish guarantees the Done sequence (close, wait, final render,
+	// newline) runs exactly once regardless of how many times Done is
+	// called.
+	finish sync.Once
 }
 
 func NewBar(total int64, label string) *Bar {
@@ -44,6 +53,7 @@ func NewBarWithOffset(total int64, label string, offset int64) *Bar {
 	}
 	b.current.Store(offset)
 	if term {
+		b.wg.Add(1)
 		go b.listen()
 	}
 	return b
@@ -65,6 +75,8 @@ func (b *Bar) Add(n int) {
 
 func (b *Bar) listen() {
 	// Update the UI 10 times per second (100ms)
+	defer b.wg.Done()
+
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -101,7 +113,11 @@ func (b *Bar) render() {
 	if speed > 0 && current < b.total {
 		remaining := b.total - current
 		etaSeconds := float64(remaining) / speed
-		eta = " ETA " + formatETA(etaSeconds)
+		// Sub-second ETAs blink as "0s" on the last chunks; only show
+		// an ETA when there is something worth reading.
+		if etaSeconds >= 1 {
+			eta = " ETA " + formatETA(etaSeconds)
+		}
 	}
 
 	if filled > b.width {
@@ -126,10 +142,19 @@ func (b *Bar) render() {
 }
 
 func (b *Bar) Done() {
-	close(b.done)
-	if b.term {
-		fmt.Println()
-	}
+	// finish runs the close/render sequence at most once, even when Done is
+	// called both explicitly (normal flow, so the final frame renders before
+	// any follow-up message) and again through a deferred call on error paths.
+	b.finish.Do(func() {
+		close(b.done)
+		// Wait for the ticker goroutine so no render runs concurrently with
+		// the final frame, then render one guaranteed last frame.
+		b.wg.Wait()
+		if b.term {
+			b.render()
+			fmt.Println()
+		}
+	})
 }
 
 func normalizeLabel(label string) string {

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,9 @@ type Downloader struct {
 	// Reporter receives lifecycle notifications and progress callbacks. New
 	// installs a no-op default when it is nil.
 	Reporter Reporter
+	// Backoff is the base delay between retry attempts: attempt n waits n *
+	// Backoff before retrying. Zero disables sleeping (useful in tests).
+	Backoff time.Duration
 }
 
 func buildHTTPClient(cfg *config.Config) *http.Client {
@@ -54,6 +58,7 @@ func New(cfg *config.Config, rep Reporter) *Downloader {
 		MaxRetries: cfg.MaxRetries,
 		Client:     buildHTTPClient(cfg),
 		Reporter:   rep,
+		Backoff:    2 * time.Second,
 	}
 }
 
@@ -69,7 +74,7 @@ func (d *Downloader) Download(urlStr string) (bool, error) {
 			return false, lastErr // permanent error, stop immediately
 		}
 		d.Reporter.Retry(attempt, lastErr)
-		time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		time.Sleep(time.Duration(attempt) * d.Backoff)
 	}
 	return false, lastErr
 }
@@ -115,7 +120,12 @@ func (d *Downloader) doDownload(urlStr string) (bool, error) {
 	fileName := resolveFilename(resp, finalURL)
 	totalSize := resp.ContentLength
 
-	supportsRanges := resp.Header.Get("Accept-Ranges") == "bytes" && totalSize > 0
+	// A server supports ranges if it advertises "Accept-Ranges: bytes", or
+	// if it already answered with a ranged response ("Content-Range").
+	// Without range support the whole file must be streamed in one piece.
+	rangeSupport := resp.Header.Get("Accept-Ranges") == "bytes" ||
+		resp.Header.Get("Content-Range") != ""
+	supportsRanges := rangeSupport && totalSize > 0
 
 	if supportsRanges {
 		return d.chunkedDownload(urlStr, fileName, totalSize)
@@ -129,6 +139,31 @@ func checkExistingFile(path string, expectedSize int64) (exists bool, size int64
 		return false, 0, false
 	}
 	return true, info.Size(), info.Size() == expectedSize
+}
+
+// verifyContentRange checks that a "bytes S-E/T" Content-Range header matches
+// the chunk bounds that were requested. Unparseable headers are tolerated:
+// the header has no strict grammar guarantee, and a mismatch is what actually
+// proves corruption.
+func verifyContentRange(cr string, start, end int64) error {
+	body := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(cr), "bytes"))
+	parts := strings.Split(body, "/")
+	if len(parts) < 2 {
+		return nil
+	}
+	bounds := strings.Split(parts[0], "-")
+	if len(bounds) != 2 {
+		return nil
+	}
+	gotStart, errStart := strconv.ParseInt(strings.TrimSpace(bounds[0]), 10, 64)
+	gotEnd, errEnd := strconv.ParseInt(strings.TrimSpace(bounds[1]), 10, 64)
+	if errStart != nil || errEnd != nil {
+		return nil
+	}
+	if gotStart != start || gotEnd != end {
+		return fmt.Errorf("server returned bytes %d-%d, want %d-%d", gotStart, gotEnd, start, end)
+	}
+	return nil
 }
 
 // chunkedDownload splits the file into numChunks parallel range requests
@@ -186,6 +221,9 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 		return false, apperrors.WrapChunkError(urlStr, -1, err)
 	}
 
+	// Close the bar before reporting the saved path so the final frame and
+	// its newline land before the follow-up message.
+	bar.Done()
 	d.Reporter.Saved(output)
 	return true, nil // actually completed
 }
@@ -224,8 +262,30 @@ func (d *Downloader) downloadChunk(
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+	// A Range request must be answered with 206 Partial Content. A 200
+	// response means the server ignored the header and sent the full body;
+	// writing or appending it into the part file would corrupt the merged
+	// file. Fail instead and leave any existing parts untouched.
+	if resp.StatusCode == http.StatusOK {
+		return apperrors.WrapHTTPError(
+			urlStr,
+			"server ignored Range request (got 200, want 206)",
+			resp.StatusCode,
+			nil,
+		)
+	}
+	if resp.StatusCode != http.StatusPartialContent {
 		return apperrors.NewStatusError(urlStr, resp)
+	}
+	if cr := resp.Header.Get("Content-Range"); cr != "" {
+		if err := verifyContentRange(cr, start, end); err != nil {
+			return apperrors.WrapHTTPError(
+				urlStr,
+				"unexpected Content-Range",
+				resp.StatusCode,
+				err,
+			)
+		}
 	}
 
 	// Open file in append mode for resume
@@ -275,6 +335,19 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 	}
 	defer resp.Body.Close()
 
+	// If we asked for a Range and got a plain 200, the server ignored the
+	// header and sent the full body again. Appending it would duplicate the
+	// already-downloaded bytes, so a resume is impossible without losing
+	// progress. Fail with a clear message instead of corrupting the file.
+	if existingSize > 0 && resp.StatusCode == http.StatusOK {
+		return false, apperrors.WrapHTTPError(
+			urlStr,
+			"cannot resume: server ignored Range request (got full 200 body)",
+			resp.StatusCode,
+			nil,
+		)
+	}
+
 	// Accept both 200 (full) and 206 (partial content)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return false, apperrors.NewStatusError(urlStr, resp)
@@ -299,6 +372,9 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 		return false, err
 	}
 
+	// Close the bar before reporting the saved path so the final frame and
+	// its newline land before the follow-up message.
+	bar.Done()
 	d.Reporter.Saved(output)
 	return true, nil
 }

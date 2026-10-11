@@ -29,7 +29,7 @@ func (cliReporter) AlreadyComplete(fileName string) {
 }
 
 func (cliReporter) Saved(path string) {
-	fmt.Printf("\n%s %s\n", ui.Green("✓ saved →"), path)
+	fmt.Printf("%s %s\n", ui.Green("✓ saved →"), path)
 }
 
 func (cliReporter) Progress(total int64, label string, offset int64) downloader.ProgressBar {
