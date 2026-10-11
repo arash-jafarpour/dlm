@@ -103,6 +103,23 @@ dlm queue add https://example.com/file2.zip
 dlm download queue
 ```
 
+## Output Flags
+
+Control the terminal output of any command:
+
+```bash
+# quiet: script/cron mode — errors only, nothing else printed
+dlm download queue --quiet
+dlm download url <url> -q
+
+# keep status messages, disable the progress bar
+# (e.g. CI logs or wide terminals where \r redraws are noisy)
+dlm download queue --no-progress
+```
+
+Both work on every command. Independently of the flags, the progress bar
+also auto-silences when stdout is not a terminal (pipes, redirects, cron).
+
 ## File Locations
 
 DLM stores its files in standard system locations:

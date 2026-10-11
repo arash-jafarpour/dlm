@@ -527,13 +527,12 @@ func TestResolveFilename(t *testing.T) {
 		{mkResp(`attachment; filename="archive.tar.gz"`), "https://x/y/ignored", "archive.tar.gz"},
 		{mkResp(""), "https://example.com/dir/file.zip", "file.zip"},
 		{mkResp(""), "https://example.com/dir/%20space%20file.bin", " space file.bin"},
-		// No path segments at all: resolveFilename falls back to
-		// download_<unix-timestamp>. Only reachable for an empty URL —
-		// a path-less URL like "https://example.com/" currently resolves
-		// to "https:" (last non-empty "segment"), a known wart tracked in
-		// V3_PLAN.md.
+		{mkResp(""), "https://example.com/dir/trailing/", "trailing"},
+		// Path-less URLs now fall back to download_<timestamp> instead of
+		// resolving to the scheme or host ("https:", "example.com:8080").
+		{mkResp(""), "https:///", "download_"},
+		{mkResp(""), "https://example.com", "download_"},
 		{mkResp(""), "", "download_"},
-		{mkResp(""), "https:///", "https:"},
 	}
 	for i, tc := range cases {
 		got := resolveFilename(tc.resp, tc.url)

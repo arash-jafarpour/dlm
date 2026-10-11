@@ -15,6 +15,9 @@ import (
 type Context struct {
 	Config     *config.Config
 	Downloader *downloader.Downloader
+	// Quiet mirrors the --quiet flag: command-level informational prints
+	// (status lines, confirmations) are suppressed while errors stay.
+	Quiet bool
 }
 
 // errNoCommand is returned when dlm is invoked without a subcommand. It lets
@@ -89,7 +92,20 @@ func newRootCmd(state *appState) *cobra.Command {
 			}
 
 			state.ctx.Config = cfg
-			state.ctx.Downloader = downloader.New(cfg, cliReporter{})
+
+			quiet, err := cmd.Flags().GetBool("quiet")
+			if err != nil {
+				return err
+			}
+			noProgress, err := cmd.Flags().GetBool("no-progress")
+			if err != nil {
+				return err
+			}
+			state.ctx.Quiet = quiet
+			state.ctx.Downloader = downloader.New(
+				cfg,
+				cliReporter{quiet: quiet, noProgress: noProgress},
+			)
 
 			return nil
 		},
@@ -103,6 +119,11 @@ func newRootCmd(state *appState) *cobra.Command {
 		newVersionCmd(),
 		newUpdateCmd(),
 	)
+
+	// Output control flags work on every command, which is why they are
+	// persistent; they only affect download/listing output, never errors.
+	root.PersistentFlags().BoolP("quiet", "q", false, "suppress all non-essential output (errors still show)")
+	root.PersistentFlags().Bool("no-progress", false, "disable the progress bar but keep status messages")
 
 	return root
 }

@@ -55,12 +55,14 @@ func downloadURL(ctx *Context, url string) error {
 		return errors.New("URL cannot be empty")
 	}
 
-	fmt.Printf("%s", ui.Cyan("→ downloading\n"))
+	if !ctx.Quiet {
+		fmt.Printf("%s", ui.Cyan("→ downloading\n"))
+	}
 	completed, err := ctx.Downloader.Download(url)
 	if err != nil {
 		return err
 	}
-	if completed {
+	if completed && !ctx.Quiet {
 		fmt.Printf("%s\n", ui.Green("✓ done"))
 	}
 	return nil
@@ -77,12 +79,14 @@ func downloadQueue(ctx *Context) error {
 	}
 
 	for i, urlStr := range lf.Links {
-		// A blank line separates one file's result block from the next
-		// download, for readability in queue mode.
-		if i > 0 {
-			fmt.Println()
+		if !ctx.Quiet {
+			// A blank line separates one file's result block from the
+			// next download, for readability in queue mode.
+			if i > 0 {
+				fmt.Println()
+			}
+			fmt.Printf("%s", ui.Cyan("→ downloading\n"))
 		}
-		fmt.Printf("%s", ui.Cyan("→ downloading\n"))
 
 		completed, err := ctx.Downloader.Download(urlStr)
 		if err != nil {

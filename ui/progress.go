@@ -25,9 +25,6 @@ type Bar struct {
 	// term records whether stdout is a real terminal. The bar only
 	// redraws (\r-based updates) when it can; on pipes, redirects, and
 	// non-interactive runs it stays silent so the output stays usable.
-	// term records whether stdout is a real terminal. The bar only
-	// redraws (\r-based updates) when it can; on pipes, redirects, and
-	// non-interactive runs it stays silent so the output stays usable.
 	term bool
 	// wg tracks the listen goroutine so Done can wait for the final render.
 	wg sync.WaitGroup

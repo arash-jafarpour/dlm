@@ -440,7 +440,12 @@ func (d *Downloader) newRequest(method, urlStr string) (*http.Request, error) {
 	return req, nil
 }
 
-// resolveFilename tries Content-Disposition first, falls back to URL path
+// resolveFilename tries Content-Disposition first, falls back to the last
+// non-empty path segment of the URL's path, and finally to a timestamped
+// name. The segment loop only ever sees u.Path, so a path-less or malformed
+// URL (e.g. "https://example.com") can no longer resolve to the host or
+// scheme, which previously produced files named like "127.0.0.1:8080" or
+// "https:".
 func resolveFilename(resp *http.Response, urlStr string) string {
 	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
 		for _, part := range splitHeader(cd) {
@@ -450,10 +455,13 @@ func resolveFilename(resp *http.Response, urlStr string) string {
 		}
 	}
 
-	segments := strings.Split(urlStr, "/")
-	for i := len(segments) - 1; i >= 0; i-- {
-		if segments[i] != "" {
-			if decoded, err := url.PathUnescape(segments[i]); err == nil && decoded != "" {
+	if u, err := url.Parse(urlStr); err == nil {
+		segments := strings.Split(strings.Trim(u.Path, "/"), "/")
+		for i := len(segments) - 1; i >= 0; i-- {
+			if segments[i] == "" {
+				continue
+			}
+			if decoded, derr := url.PathUnescape(segments[i]); derr == nil && decoded != "" {
 				return decoded
 			}
 			return segments[i]
