@@ -38,12 +38,13 @@ func (b *recordBar) Done()     { b.finish.Do(b.rec.progressDone) }
 // eventRecorder captures everything the downloader reports. It is safe for
 // concurrent use because chunk goroutines call Add in parallel.
 type eventRecorder struct {
-	mu       sync.Mutex
-	added    int
-	done     bool
-	complete string
-	saved    []string
-	retries  []int
+	mu           sync.Mutex
+	added        int
+	done         bool
+	complete     string
+	saved        []string
+	retries      []int
+	chunkRetries []string // "chunk=<index> attempt=<n>"
 	// events keeps the ordering between Done and Saved observable.
 	events []string
 }
@@ -52,6 +53,13 @@ func (e *eventRecorder) Retry(attempt int, _ error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.retries = append(e.retries, attempt)
+}
+
+func (e *eventRecorder) ChunkRetry(chunkIndex, attempt int, _ error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.chunkRetries = append(e.chunkRetries,
+		fmt.Sprintf("chunk=%d attempt=%d", chunkIndex, attempt))
 }
 
 func (e *eventRecorder) AlreadyComplete(fileName string) {
@@ -87,12 +95,13 @@ func (e *eventRecorder) progressDone() {
 // recorderSnapshot is a lock-free copy of eventRecorder's state so tests can
 // read recorded values after the fact without handing out the mutex.
 type recorderSnapshot struct {
-	added    int
-	done     bool
-	complete string
-	saved    []string
-	retries  []int
-	events   []string
+	added        int
+	done         bool
+	complete     string
+	saved        []string
+	retries      []int
+	chunkRetries []string
+	events       []string
 }
 
 func (e *eventRecorder) snapshot() recorderSnapshot {
@@ -100,7 +109,7 @@ func (e *eventRecorder) snapshot() recorderSnapshot {
 	defer e.mu.Unlock()
 	s := recorderSnapshot{
 		added: e.added, done: e.done, complete: e.complete,
-		saved: e.saved, retries: e.retries,
+		saved: e.saved, retries: e.retries, chunkRetries: e.chunkRetries,
 	}
 	s.events = append(s.events, e.events...)
 	return s
@@ -396,8 +405,11 @@ func TestChunkDownloadRetriesTransientFailure(t *testing.T) {
 		t.Fatal("file corrupt after retry recovery")
 	}
 	ev := rec.snapshot()
-	if len(ev.retries) == 0 {
-		t.Error("expected a Retry report")
+	if len(ev.retries) != 0 {
+		t.Errorf("outer download loop must not restart for a chunk failure: %v", ev.retries)
+	}
+	if len(ev.chunkRetries) == 0 {
+		t.Error("expected a ChunkRetry report")
 	}
 }
 
@@ -478,6 +490,144 @@ func TestStreamDownloadRejectsResumeWithoutRangeSupport(t *testing.T) {
 	// The partial file must be left untouched (no append corruption).
 	if got := mustReadFile(t, output); !bytes.Equal(got, data[:len(data)/2]) {
 		t.Error("partial file was modified after a refused resume")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Retry behavior
+// ---------------------------------------------------------------------------
+
+// alwaysFailServer serves healthy metadata (so the chunked path engages)
+// but answers every chunk request with 429; the exhaustion test can then
+// exercise chunk retry budgets without any sleeping (Retry-After "0" and
+// Backoff=0).
+func alwaysFailServer(data []byte) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", testFileName))
+		if r.Header.Get("Range") != "" {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		if r.Method == http.MethodHead {
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		_, _ = w.Write(data)
+	}))
+}
+
+func TestChunkRetryExhaustionIsPermanent(t *testing.T) {
+	srv := alwaysFailServer(bytes.Repeat([]byte("f"), 256*1024))
+	defer srv.Close()
+
+	rec := &eventRecorder{}
+	d := testDownloader(t, rec, 2, 2)
+
+	_, err := d.Download(srv.URL)
+	if err == nil {
+		t.Fatal("expected download to fail when every chunk attempt fails")
+	}
+	// Exhausted chunks must not look transient: the outer Download loop is
+	// forbidden from restarting the whole download for the same failure.
+	if apperrors.IsRetryable(err) {
+		t.Fatalf("exhausted chunk error must be permanent, got retryable: %v", err)
+	}
+	if got := len(rec.snapshot().chunkRetries); got != d.NumChunks {
+		t.Errorf("chunk retries = %d, want %d (one per chunk)", got, d.NumChunks)
+	}
+	if got := rec.snapshot().retries; len(got) != 0 {
+		t.Errorf("outer loop must not retry a permanent chunk failure: %v", got)
+	}
+}
+
+func TestDownloadRetriesMetadataFailure(t *testing.T) {
+	data := bytes.Repeat([]byte("m"), 128*1024)
+	var mu sync.Mutex
+	metadataCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", testFileName))
+		if r.Method == http.MethodHead || r.Header.Get("Range") == "" {
+			// Fail the first HEAD *and* its immediate GET fallback so
+			// attempt 1 dies in the metadata phase, not through the
+			// fallback path.
+			mu.Lock()
+			metadataCalls++
+			fail := metadataCalls <= 2
+			mu.Unlock()
+			if fail {
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			_, _ = w.Write(data)
+			return
+		}
+		http.ServeContent(w, r, testFileName, time.Time{}, bytes.NewReader(data))
+	}))
+	defer srv.Close()
+
+	rec := &eventRecorder{}
+	d := testDownloader(t, rec, 2, 2)
+
+	completed, err := d.Download(srv.URL)
+	if err != nil {
+		t.Fatalf("Download should recover after a metadata 503: %v", err)
+	}
+	if !completed {
+		t.Fatal("expected completed=true after metadata retry")
+	}
+	if got := rec.snapshot().retries; len(got) != 1 || got[0] != 1 {
+		t.Errorf("outer Retry reports = %v, want [1]", got)
+	}
+}
+
+func TestBackoffDelayComputation(t *testing.T) {
+	// ... with jitter-checked exponential growth cap MaxBackoff
+	d := &Downloader{Backoff: time.Second, MaxBackoff: 4 * time.Second}
+	base := time.Second
+	for attempt := 1; attempt <= 5; attempt++ {
+		delay := d.backoffFor(attempt)
+		lo := time.Duration(float64(base) * 0.75)
+		hi := time.Duration(float64(base) * 1.25)
+		if delay < lo || delay > hi {
+			t.Errorf("attempt %d: delay=%v, want within [%v, %v]", attempt, delay, lo, hi)
+		}
+		// Grow the reference the same way backoffFor does.
+		base *= 2
+		if base > d.MaxBackoff {
+			base = d.MaxBackoff
+		}
+	}
+
+	if got := (&Downloader{Backoff: 0}).backoffFor(3); got != 0 {
+		t.Errorf("zero Backoff must disable waiting, got %v", got)
+	}
+
+	// A Retry-After longer than the scheduled delay must win. Build the
+	// HTTPError through actual header parsing to exercise both layers.
+	resp := &http.Response{Header: http.Header{}, StatusCode: 429, Status: "429 Too Many Requests"}
+	resp.Header.Set("Retry-After", "5")
+	httpErr := apperrors.NewStatusError("https://x", resp)
+	d = &Downloader{Backoff: time.Nanosecond, MaxBackoff: time.Nanosecond}
+	if got := d.backoffDelay(1, httpErr); got != 5*time.Second {
+		t.Errorf("backoffDelay with Retry-After=5s = %v, want 5s", got)
+	}
+
+	// RetryAfterOf parsing itself.
+	resp.Header.Del("Retry-After")
+	if got := apperrors.RetryAfterOf(resp); got != 0 {
+		t.Errorf("missing header must give 0, got %v", got)
 	}
 }
 

@@ -2,8 +2,10 @@ package downloader
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -26,9 +28,12 @@ type Downloader struct {
 	// Reporter receives lifecycle notifications and progress callbacks. New
 	// installs a no-op default when it is nil.
 	Reporter Reporter
-	// Backoff is the base delay between retry attempts: attempt n waits n *
-	// Backoff before retrying. Zero disables sleeping (useful in tests).
+	// Backoff is the expo-base delay for retrying: the first retry waits
+	// Backoff, the second doubles it, and so on. Zero disables sleeping
+	// (useful in tests).
 	Backoff time.Duration
+	// MaxBackoff caps the exponentially grown retry delay (before jitter).
+	MaxBackoff time.Duration
 }
 
 func buildHTTPClient(cfg *config.Config) *http.Client {
@@ -59,13 +64,14 @@ func New(cfg *config.Config, rep Reporter) *Downloader {
 		Client:     buildHTTPClient(cfg),
 		Reporter:   rep,
 		Backoff:    2 * time.Second,
+		MaxBackoff: 8 * time.Second,
 	}
 }
 
 func (d *Downloader) Download(urlStr string) (bool, error) {
 	var lastErr error
 	var completed bool
-	for attempt := 1; attempt <= d.MaxRetries; attempt++ {
+	for attempt := 1; ; attempt++ {
 		completed, lastErr = d.doDownload(urlStr)
 		if lastErr == nil {
 			return completed, nil
@@ -73,10 +79,45 @@ func (d *Downloader) Download(urlStr string) (bool, error) {
 		if !apperrors.IsRetryable(lastErr) {
 			return false, lastErr // permanent error, stop immediately
 		}
+		if attempt >= d.MaxRetries {
+			return false, lastErr
+		}
 		d.Reporter.Retry(attempt, lastErr)
-		time.Sleep(time.Duration(attempt) * d.Backoff)
+		d.sleepBackoff(attempt, lastErr)
 	}
-	return false, lastErr
+}
+
+// backoffFor returns the wait before retrying the given attempt number:
+// exponential in Backoff, capped at MaxBackoff, padded with ±25% jitter so
+// parallel chunk retries do not re-collide on a rate-limited server.
+func (d *Downloader) backoffFor(attempt int) time.Duration {
+	if d.Backoff <= 0 {
+		return 0
+	}
+	delay := d.Backoff
+	for i := 1; i < attempt; i++ {
+		delay *= 2
+		if d.MaxBackoff > 0 && delay >= d.MaxBackoff {
+			delay = d.MaxBackoff
+			break
+		}
+	}
+	return time.Duration(float64(delay) * (0.75 + 0.5*rand.Float64()))
+}
+
+// backoffDelay is the effective retry delay: the backoff schedule, raised
+// when the server declares a longer Retry-After than we would wait anyway.
+func (d *Downloader) backoffDelay(attempt int, err error) time.Duration {
+	delay := d.backoffFor(attempt)
+	var httpErr *apperrors.HTTPError
+	if errors.As(err, &httpErr) && httpErr.RetryAfter > delay {
+		delay = httpErr.RetryAfter
+	}
+	return delay
+}
+
+func (d *Downloader) sleepBackoff(attempt int, err error) {
+	time.Sleep(d.backoffDelay(attempt, err))
 }
 
 func (d *Downloader) doDownload(urlStr string) (bool, error) {
@@ -91,20 +132,27 @@ func (d *Downloader) doDownload(urlStr string) (bool, error) {
 	}
 	resp, err := d.Client.Do(req)
 
-	// If HEAD fails or returns 405/403 (Method Not Allowed), try GET
+	// If HEAD fails (network) or is rejected by the server (>=400), try a
+	// plain GET just to read the metadata headers.
 	if err != nil || (resp != nil && resp.StatusCode >= 400) {
 		if resp != nil {
 			resp.Body.Close()
 		}
-		// Fallback: Try a GET request but close the body immediately
-		// just to get the headers/metadata.
 		req, _ = d.newRequest("GET", urlStr)
 		resp, err = d.Client.Do(req)
-		if err != nil {
+		if err != nil || (resp != nil && resp.StatusCode >= 400) {
+			// A rejected fallback must surface as a proper status error
+			// (retryable per IsRetryable) rather than being treated as
+			// healthy metadata — a 503 body is not the file.
+			code := -1
+			if err == nil {
+				code = resp.StatusCode
+				resp.Body.Close()
+			}
 			return false, apperrors.WrapHTTPError(
 				urlStr,
 				"metadata fetch failed (HEAD and GET both failed)",
-				-1,
+				code,
 				err,
 			)
 		}
@@ -202,7 +250,7 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 		wg.Add(1)
 		go func(index int, s, e int64, path string) {
 			defer wg.Done()
-			err := d.downloadChunk(urlStr, s, e, path, bar)
+			err := d.chunkWithRetries(urlStr, index, s, e, path, bar)
 			results <- result{index: index, err: err}
 		}(i, start, end, tmpPath)
 	}
@@ -226,6 +274,35 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 	bar.Done()
 	d.Reporter.Saved(output)
 	return true, nil // actually completed
+}
+
+// chunkWithRetries runs downloadChunk for one chunk with its own retry
+// budget. Because downloadChunk resumes from the existing .part file on
+// every call, each retry continues exactly where the previous one stopped —
+// no bytes are re-fetched. When the whole budget is exhausted the final
+// error is marked permanent so the outer Download loop does not restart the
+// entire download just to hit the same failure again.
+func (d *Downloader) chunkWithRetries(
+	urlStr string,
+	index int,
+	start, end int64,
+	path string,
+	bar ProgressBar,
+) error {
+	for attempt := 1; ; attempt++ {
+		err := d.downloadChunk(urlStr, start, end, path, bar)
+		if err == nil {
+			return nil
+		}
+		if !apperrors.IsRetryable(err) {
+			return err
+		}
+		if attempt >= d.MaxRetries {
+			return apperrors.MarkPermanent(err)
+		}
+		d.Reporter.ChunkRetry(index, attempt, err)
+		d.sleepBackoff(attempt, err)
+	}
 }
 
 // download a single chunk

@@ -15,9 +15,13 @@ type ProgressBar interface {
 // from multiple chunk goroutines simultaneously, and every other method may
 // also be invoked while transfers run.
 type Reporter interface {
-	// Retry is called after an attempt failed and another attempt is about
-	// to start (after the last attempt of the max it is also called once).
+	// Retry is called after a whole-download attempt failed, immediately
+	// before the next attempt starts.
 	Retry(attempt int, err error)
+	// ChunkRetry is called after a single chunk attempt failed, immediately
+	// before that chunk's next attempt starts. Chunks retry independently,
+	// so several chunk attempts may interleave.
+	ChunkRetry(chunkIndex, attempt int, err error)
 	// AlreadyComplete is called when the target file already exists with
 	// the expected size, so nothing was downloaded.
 	AlreadyComplete(fileName string)
@@ -33,6 +37,7 @@ type Reporter interface {
 type noopReporter struct{}
 
 func (noopReporter) Retry(int, error)                          {}
+func (noopReporter) ChunkRetry(int, int, error)                {}
 func (noopReporter) AlreadyComplete(string)                    {}
 func (noopReporter) Saved(string)                              {}
 func (noopReporter) Progress(int64, string, int64) ProgressBar { return noopBar{} }

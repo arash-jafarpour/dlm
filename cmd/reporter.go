@@ -31,6 +31,14 @@ func (r cliReporter) Retry(attempt int, err error) {
 	fmt.Println("retrying...")
 }
 
+func (r cliReporter) ChunkRetry(chunkIndex, attempt int, err error) {
+	if r.quiet {
+		return
+	}
+	fmt.Printf("  chunk %d attempt %d failed: %v\n", chunkIndex, attempt, err)
+	fmt.Println("retrying...")
+}
+
 func (r cliReporter) AlreadyComplete(fileName string) {
 	if r.quiet {
 		return
