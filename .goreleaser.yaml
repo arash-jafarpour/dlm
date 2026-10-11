@@ -38,5 +38,28 @@ checksum:
   # looks for exactly that naming before applying an update.
   split: true
 
+changelog:
+  # Generate release notes from Conventional Commits between tags and
+  # group them in the GitHub release body. Users running `dlm update`
+  # see exactly this text: the hand-rolled updater prints release.Body.
+  use: git
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.*\))?:'
+      order: 10
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.*\))?:'
+      order: 20
+    - title: Others
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
 release:
   draft: false
