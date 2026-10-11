@@ -114,7 +114,7 @@ func queueClearWithConfirm(ctx *Context, requireConfirm bool) error {
 	if requireConfirm {
 		fmt.Printf("This will remove %d item(s) from the queue. Continue? [y/N]: ", len(lf.Links))
 		var input string
-		fmt.Scanln(&input)
+		_, _ = fmt.Scanln(&input) // prompt; an empty/failed input falls through to the [y/N] default
 		input = strings.ToLower(strings.TrimSpace(input))
 
 		if input != "y" && input != "yes" {

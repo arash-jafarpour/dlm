@@ -151,7 +151,7 @@ func noRangeServer(data []byte) *httptest.Server {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		w.Write(data)
+		_, _ = w.Write(data)
 	}))
 }
 
@@ -168,7 +168,7 @@ func ignoreRangeServer(data []byte) *httptest.Server {
 			return
 		}
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		w.Write(data)
+		_, _ = w.Write(data)
 	}))
 }
 
@@ -188,7 +188,7 @@ func fragServer(data []byte) *httptest.Server {
 		if r.Header.Get("Range") == "" {
 			// Metadata-fallback GET (no Range): serve full metadata body.
 			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-			w.Write(data)
+			_, _ = w.Write(data)
 			return
 		}
 		mu.Lock()

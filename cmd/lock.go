@@ -29,13 +29,25 @@ func acquireLock() (*LockFile, error) {
 	}
 
 	if err := flockExclusive(file); err != nil {
-		file.Close()
+		_ = file.Close() // best effort; the error path already decided
 		return nil, fmt.Errorf("another instance of dlm is already running")
 	}
 
-	file.Truncate(0)
-	file.Seek(0, 0)
-	fmt.Fprintf(file, "%d\n", os.Getpid())
+	// The pid is best-effort diagnostics for the process table; failures to
+	// write it must not make a working lock fail, but an unwriteable lock
+	// file is suspicious enough to abort.
+	if err := file.Truncate(0); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("failed to truncate lock file: %w", err)
+	}
+	if _, err := file.Seek(0, 0); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("failed to seek lock file: %w", err)
+	}
+	if _, err := fmt.Fprintf(file, "%d\n", os.Getpid()); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("failed to write pid to lock file: %w", err)
+	}
 
 	return &LockFile{
 		path: lockPath,
@@ -48,7 +60,9 @@ func (lf *LockFile) Release() error {
 		return nil
 	}
 
-	funlock(lf.file)
+	if err := funlock(lf.file); err != nil {
+		return fmt.Errorf("failed to release lock: %w", err)
+	}
 
 	if err := lf.file.Close(); err != nil {
 		return err

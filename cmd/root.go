@@ -38,7 +38,9 @@ func Execute() error {
 	err := root.Execute()
 
 	if state.lock != nil {
-		state.lock.Release()
+		// The lock file close/remove is best-effort housekeeping: the flock
+		// is already gone, so a failed os.Remove must not mask the result.
+		_ = state.lock.Release()
 	}
 
 	if err != nil {

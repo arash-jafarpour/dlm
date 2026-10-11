@@ -13,7 +13,7 @@ func TestQueueAdd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 	tmpFile.Close()
 
 	cfg := config.Default()
@@ -43,7 +43,7 @@ func TestQueueList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 
 	// Write test data
 	testData := "https://example.com\nhttps://test.com\n"
@@ -67,7 +67,7 @@ func TestQueueClear(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 
 	// Write test data
 	testData := "https://example.com\nhttps://test.com\n"

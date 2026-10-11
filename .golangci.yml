@@ -1,0 +1,21 @@
+version: "2"
+
+# Standard set: errcheck, govet, ineffassign, staticcheck, unused.
+# Formatting is handled by goimports-reviser via the editor, so gofmt-style
+# linters are intentionally not enabled here.
+linters:
+  default: standard
+  settings:
+    errcheck:
+      # Deferred Close calls are cleanup, not decisions: Close on *os.File
+      # and response bodies is best-effort by design (write paths surface
+      # real errors via fwrite/flush instead). Everything else must check
+      # its errors.
+      exclude-functions:
+        - (*os.File).Close
+        - (io.ReadCloser).Close
+
+issues:
+  # Show every finding; no noise-management caps.
+  max-issues-per-linter: 0
+  max-same-issues: 0

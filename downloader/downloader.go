@@ -393,11 +393,13 @@ func mergeFiles(dst string, tmpFiles []string) error {
 			return apperrors.WrapFileError(tmp, "open", err)
 		}
 		if _, err := io.Copy(out, f); err != nil {
-			f.Close()
+			_ = f.Close()
 			return apperrors.WrapFileError(tmp, "copy", err)
 		}
-		f.Close()
-		os.Remove(tmp)
+		_ = f.Close()
+		// Leftover part files are cleaned up best effort: a failed
+		// os.Remove must not fail an otherwise complete download.
+		_ = os.Remove(tmp)
 	}
 	return nil
 }

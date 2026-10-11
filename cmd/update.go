@@ -6,7 +6,7 @@ import (
 	"os"
 	"regexp"
 
-	"github.com/blang/semver"
+	"github.com/Masterminds/semver/v3"
 	"github.com/rhysd/go-github-selfupdate/selfupdate"
 	"github.com/spf13/cobra"
 )
@@ -56,13 +56,21 @@ func runUpdate(checkOnly bool) error {
 		return nil
 	}
 
-	if !latest.Version.GT(current) {
+	// selfupdate reports versions in the unmaintained blang/semver layout;
+	// reparse into our own Masterminds version for comparison, keeping
+	// blang an indirect-only dependency.
+	latestVersion, err := semver.NewVersion(latest.Version.String())
+	if err != nil {
+		return fmt.Errorf("could not parse latest release version %q: %w", latest.Version.String(), err)
+	}
+
+	if !latestVersion.GreaterThan(current) {
 		fmt.Printf("dlm is already up to date (v%s)\n", current)
 		return nil
 	}
 
 	if checkOnly {
-		fmt.Printf("new version available: v%s (current v%s)\n", latest.Version, current)
+		fmt.Printf("new version available: v%s (current v%s)\n", latestVersion, current)
 		return nil
 	}
 
@@ -71,7 +79,7 @@ func runUpdate(checkOnly bool) error {
 		return fmt.Errorf("could not locate the dlm executable: %w", err)
 	}
 
-	fmt.Printf("updating dlm v%s -> v%s ...\n", current, latest.Version)
+	fmt.Printf("updating dlm v%s -> v%s ...\n", current, latestVersion)
 	if err := updater.UpdateTo(latest, exe); err != nil {
 		return fmt.Errorf(
 			"update failed: %w\n"+
@@ -80,7 +88,7 @@ func runUpdate(checkOnly bool) error {
 		)
 	}
 
-	fmt.Printf("successfully updated dlm to v%s\n", latest.Version)
+	fmt.Printf("successfully updated dlm to v%s\n", latestVersion)
 	if latest.ReleaseNotes != "" {
 		fmt.Printf("\n%s\n", latest.ReleaseNotes)
 	}
@@ -90,12 +98,16 @@ func runUpdate(checkOnly bool) error {
 
 // currentSemver returns the base semantic version of the running build, or an
 // error if it is a development build that cannot be compared or updated.
-func currentSemver() (semver.Version, error) {
+func currentSemver() (*semver.Version, error) {
 	base := semverRe.FindString(version)
 	if base == "" {
-		return semver.Version{}, errors.New(
+		return nil, errors.New(
 			"this is a development build; reinstall from a release to enable self-update",
 		)
 	}
-	return semver.Parse(base)
+	v, err := semver.NewVersion(base)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse version %q: %w", version, err)
+	}
+	return v, nil
 }
