@@ -14,7 +14,7 @@ import (
 
 type Context struct {
 	Config     *config.Config
-	Downloader *downloader.Downloader
+	Downloader DownloadRunner
 	// Quiet mirrors the --quiet flag: command-level informational prints
 	// (status lines, confirmations) are suppressed while errors stay.
 	Quiet bool

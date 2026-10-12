@@ -1,17 +1,23 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
-	"time"
+	"sync"
 
-	"github.com/arash-jafarpour/dlm/reader"
+	"github.com/arash-jafarpour/dlm/downloader"
 	"github.com/arash-jafarpour/dlm/ui"
 
 	"github.com/spf13/cobra"
 )
+
+// DownloadRunner is the downloader behavior the download commands depend
+// on. *downloader.Downloader implements it; test doubles can too.
+type DownloadRunner interface {
+	Download(ctx context.Context, url string) (bool, error)
+}
 
 func newDownloadCmd(ctx *Context) *cobra.Command {
 	cmd := &cobra.Command{
@@ -58,7 +64,7 @@ func downloadURL(ctx *Context, url string) error {
 	if !ctx.Quiet {
 		fmt.Printf("%s", ui.Cyan("→ downloading\n"))
 	}
-	completed, err := ctx.Downloader.Download(url)
+	completed, err := ctx.Downloader.Download(context.Background(), url)
 	if err != nil {
 		return err
 	}
@@ -69,69 +75,106 @@ func downloadURL(ctx *Context, url string) error {
 }
 
 func downloadQueue(ctx *Context) error {
-	lf, err := reader.ReadLinks(ctx.Config.QueueFile)
+	store := newQueueStore(ctx)
+	urls, err := store.load()
 	if err != nil {
 		return err
 	}
-	if len(lf.Links) == 0 {
+	if len(urls) == 0 {
 		fmt.Println("no links found in queue")
 		return nil
 	}
 
-	for i, urlStr := range lf.Links {
+	jobs := ctx.Config.QueueJobs
+	if jobs > len(urls) {
+		jobs = len(urls)
+	}
+	if jobs > 1 {
+		return downloadQueueParallel(ctx, store, urls, jobs)
+	}
+	return downloadQueueSequential(ctx, store, urls)
+}
+
+// downloadQueueSequential keeps the classic one-file-at-a-time flow, with
+// the per-file formatting queue users know (blank line between blocks).
+func downloadQueueSequential(
+	ctx *Context,
+	store *queueStore,
+	urls []string,
+) error {
+	for i, urlStr := range urls {
 		if !ctx.Quiet {
-			// A blank line separates one file's result block from the
-			// next download, for readability in queue mode.
 			if i > 0 {
 				fmt.Println()
 			}
 			fmt.Printf("%s", ui.Cyan("→ downloading\n"))
 		}
 
-		completed, err := ctx.Downloader.Download(urlStr)
+		completed, err := ctx.Downloader.Download(context.Background(), urlStr)
 		if err != nil {
 			logError(err)
 			continue
 		}
 
 		if completed {
-			if err := markCompleted(ctx, urlStr); err != nil {
-				fmt.Printf("%s %v\n", ui.Yellow("⚠ couldn't mark as completed:"), err)
-			}
-			if err := removeFromQueue(ctx, urlStr); err != nil {
-				fmt.Printf("%s %v\n", ui.Yellow("⚠ couldn't remove from queue:"), err)
+			if err := store.completeAndRemove(urlStr); err != nil {
+				fmt.Printf("%s %v\n", ui.Yellow("⚠ couldn't record completed download:"), err)
 			}
 		}
 	}
 	return nil
 }
 
-func markCompleted(ctx *Context, urlStr string) error {
-	f, err := os.OpenFile(ctx.Config.CompletedFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	_, err = fmt.Fprintf(f, "%s | %s\n", timestamp, urlStr)
-	return err
-}
-
-func removeFromQueue(ctx *Context, urlStr string) error {
-	data, err := os.ReadFile(ctx.Config.QueueFile)
-	if err != nil {
-		return err
+// downloadQueueParallel runs up to jobs files concurrently. All output goes
+// through one ui.MultiBar block: a live bar row per active file, `✓ saved →`
+// and failures as permanent lines, everything keyed by file name (never the
+// raw URLs).
+func downloadQueueParallel(
+	ctx *Context,
+	store *queueStore,
+	urls []string,
+	jobs int,
+) error {
+	mgr := ui.NewMultiBar()
+	defer mgr.Finish()
+	if !ctx.Quiet {
+		mgr.Line(ui.Cyan(fmt.Sprintf("→ downloading %d files (%d workers)", len(urls), jobs)))
 	}
 
-	lines := strings.Split(string(data), "\n")
-	var kept []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != urlStr && line != "" {
-			kept = append(kept, line)
-		}
+	var wg sync.WaitGroup
+	urlCh := make(chan string)
+
+	for w := 0; w < jobs; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for url := range urlCh {
+				rep := &parallelReporter{mgr: mgr, quiet: ctx.Quiet}
+				// Swap the per-job reporter in instead of the CLI-shared
+				// one; shares the same HTTP transport either way.
+				runner := DownloadRunner(ctx.Downloader)
+				if concrete, ok := runner.(*downloader.Downloader); ok {
+					runner = concrete.WithReporter(rep)
+				}
+
+				completed, err := runner.Download(context.Background(), url)
+				if err != nil {
+					rep.finishError(err)
+					continue
+				}
+				if completed {
+					if storeErr := store.completeAndRemove(url); storeErr != nil {
+						mgr.Line(fmt.Sprintf("%s %v", ui.Yellow("⚠ couldn't record completed download:"), storeErr))
+					}
+				}
+			}
+		}()
 	}
 
-	return os.WriteFile(ctx.Config.QueueFile, []byte(strings.Join(kept, "\n")+"\n"), 0o644)
+	for _, url := range urls {
+		urlCh <- url
+	}
+	close(urlCh)
+	wg.Wait()
+	return nil
 }

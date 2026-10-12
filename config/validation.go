@@ -6,6 +6,9 @@ func (c *Config) Validate() error {
 	if err := ValidateNumChunks(c.NumChunks); err != nil {
 		return err
 	}
+	if err := ValidateQueueJobs(c.QueueJobs); err != nil {
+		return err
+	}
 	if err := ValidateMaxRetries(c.MaxRetries); err != nil {
 		return err
 	}
@@ -31,6 +34,19 @@ func ValidateNumChunks(chunks int) error {
 	}
 	if chunks > 16 {
 		return fmt.Errorf("num_chunks cannot exceed 16")
+	}
+	return nil
+}
+
+// ValidateQueueJobs bounds parallel queue downloads defensively: 1 keeps
+// the sequential behavior, and sane upper bounds keep the terminal output
+// (one active file per job) readable and the server polite.
+func ValidateQueueJobs(jobs int) error {
+	if jobs < 1 {
+		return fmt.Errorf("queue_jobs must be at least 1")
+	}
+	if jobs > 8 {
+		return fmt.Errorf("queue_jobs cannot exceed 8")
 	}
 	return nil
 }

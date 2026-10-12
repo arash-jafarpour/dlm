@@ -320,6 +320,7 @@ is pushed.
 | Key                    | Type     | Default                       | Description                               |
 | ---------------------- | -------- | ----------------------------- | ----------------------------------------- |
 | `num_chunks`           | `int`    | `8`                           | Number of parallel download chunks (1-16) |
+| `queue_jobs`           | `int`    | `1`                           | Simultaneous queue downloads (1-8)        |
 | `output_dir`           | `string` | `~/Downloads/dlm`             | Directory where files are saved           |
 | `queue_file`           | `string` | `~/.config/dlm/queue.txt`     | Path to queue file                        |
 | `completed_file`       | `string` | `~/.config/dlm/completed.txt` | Path to completed downloads list          |

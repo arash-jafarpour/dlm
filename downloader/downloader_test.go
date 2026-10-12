@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -246,7 +247,7 @@ func TestChunkedDownloadMergesChunks(t *testing.T) {
 	rec := &eventRecorder{}
 	d := testDownloader(t, rec, 4, 1)
 
-	completed, err := d.Download(srv.URL)
+	completed, err := d.Download(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("Download failed: %v", err)
 	}
@@ -314,7 +315,7 @@ func TestChunkedDownloadResumesPartialChunk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	completed, err := d.Download(srv.URL)
+	completed, err := d.Download(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("Download failed: %v", err)
 	}
@@ -335,7 +336,7 @@ func TestChunkedDownloadRejectsFullBodyForRange(t *testing.T) {
 
 	d := testDownloader(t, &eventRecorder{}, 4, 1)
 
-	_, err := d.Download(srv.URL)
+	_, err := d.Download(context.Background(), srv.URL)
 	if err == nil {
 		t.Fatal("expected an error when a server answers 200 to a Range request")
 	}
@@ -354,7 +355,7 @@ func TestChunkedDownloadAcceptsMatchingContentRange(t *testing.T) {
 	defer srv.Close()
 
 	d := testDownloader(t, &eventRecorder{}, 4, 1)
-	if _, err := d.Download(srv.URL); err != nil {
+	if _, err := d.Download(context.Background(), srv.URL); err != nil {
 		t.Fatalf("Download failed on matching Content-Range: %v", err)
 	}
 }
@@ -367,10 +368,10 @@ func TestAlreadyCompleteChunked(t *testing.T) {
 	rec := &eventRecorder{}
 	d := testDownloader(t, rec, 4, 1)
 
-	if _, err := d.Download(srv.URL); err != nil {
+	if _, err := d.Download(context.Background(), srv.URL); err != nil {
 		t.Fatalf("first Download failed: %v", err)
 	}
-	completed, err := d.Download(srv.URL)
+	completed, err := d.Download(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("second Download failed: %v", err)
 	}
@@ -394,7 +395,7 @@ func TestChunkDownloadRetriesTransientFailure(t *testing.T) {
 	rec := &eventRecorder{}
 	d := testDownloader(t, rec, 4, 2)
 
-	completed, err := d.Download(srv.URL)
+	completed, err := d.Download(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("Download should recover after a 503 chunk: %v", err)
 	}
@@ -425,7 +426,7 @@ func TestStreamDownload(t *testing.T) {
 	rec := &eventRecorder{}
 	d := testDownloader(t, rec, 4, 1)
 
-	completed, err := d.Download(srv.URL)
+	completed, err := d.Download(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("Download failed: %v", err)
 	}
@@ -453,7 +454,7 @@ func TestStreamDownloadResumesWithRange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	completed, err := d.Download(srv.URL)
+	completed, err := d.Download(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("resumed stream Download failed: %v", err)
 	}
@@ -479,7 +480,7 @@ func TestStreamDownloadRejectsResumeWithoutRangeSupport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := d.Download(srv.URL)
+	_, err := d.Download(context.Background(), srv.URL)
 	if err == nil {
 		t.Fatal("expected an error when resuming against a non-range server")
 	}
@@ -496,6 +497,107 @@ func TestStreamDownloadRejectsResumeWithoutRangeSupport(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Retry behavior
 // ---------------------------------------------------------------------------
+
+// slowServer streams data in small pieces with a delay, enough to observe
+// a context cancel arriving mid-transfer.
+func slowServer(data []byte, perWrite time.Duration) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", testFileName))
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		w.Header().Set("Accept-Ranges", "bytes")
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Header.Get("Range") != "" {
+			start, end, ok := parseRange(r.Header.Get("Range"), int64(len(data)))
+			if !ok {
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			w.WriteHeader(http.StatusPartialContent)
+			writeSlow(w, data[start:end+1], perWrite)
+			return
+		}
+		writeSlow(w, data, perWrite)
+	}))
+}
+
+func parseRange(header string, total int64) (int64, int64, bool) {
+	header = strings.TrimPrefix(strings.ToLower(header), "bytes=")
+	parts := strings.Split(header, "-")
+	if len(parts) != 2 || parts[0] == "" {
+		return 0, 0, false
+	}
+	start, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || start < 0 || start >= total {
+		return 0, 0, false
+	}
+	if parts[1] == "" {
+		return start, total - 1, true
+	}
+	end, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || end < start {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+func writeSlow(w http.ResponseWriter, data []byte, perWrite time.Duration) {
+	const piece = 64 * 1024
+	for len(data) > 0 {
+		n := piece
+		if n > len(data) {
+			n = len(data)
+		}
+		if _, err := w.Write(data[:n]); err != nil {
+			return // client went away: expected on cancels
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		data = data[n:]
+		time.Sleep(perWrite)
+	}
+}
+
+func TestDownloadHonorsContextCancel(t *testing.T) {
+	data := bytes.Repeat([]byte("c"), 4*1024*1024)
+	srv := slowServer(data, 10*time.Millisecond) // ~30 writes minimum
+	defer srv.Close()
+
+	d := testDownloader(t, &eventRecorder{}, 4, 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(120 * time.Millisecond) // let some bytes land
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := d.Download(ctx, srv.URL)
+	took := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected a cancel error")
+	}
+	if apperrors.IsRetryable(err) {
+		t.Fatalf("cancel must not be retryable: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error must wrap context.Canceled, got: %v", err)
+	}
+	// 4 MiB at 10ms/64KiB would take ~600ms; the cancel cuts in.
+	if took > 400*time.Millisecond {
+		t.Errorf("cancel took %v to propagate, too slow", took)
+	}
+	// A partial part file is fine (resume material); what must not exist
+	// is the final file.
+	final := filepath.Join(d.OutputDir, testFileName)
+	if _, statErr := os.Stat(final); statErr == nil {
+		t.Error("canceled download must not have assembled the final file")
+	}
+}
 
 // alwaysFailServer serves healthy metadata (so the chunked path engages)
 // but answers every chunk request with 429; the exhaustion test can then
@@ -528,7 +630,7 @@ func TestChunkRetryExhaustionIsPermanent(t *testing.T) {
 	rec := &eventRecorder{}
 	d := testDownloader(t, rec, 2, 2)
 
-	_, err := d.Download(srv.URL)
+	_, err := d.Download(context.Background(), srv.URL)
 	if err == nil {
 		t.Fatal("expected download to fail when every chunk attempt fails")
 	}
@@ -580,7 +682,7 @@ func TestDownloadRetriesMetadataFailure(t *testing.T) {
 	rec := &eventRecorder{}
 	d := testDownloader(t, rec, 2, 2)
 
-	completed, err := d.Download(srv.URL)
+	completed, err := d.Download(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("Download should recover after a metadata 503: %v", err)
 	}

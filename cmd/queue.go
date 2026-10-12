@@ -6,9 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/arash-jafarpour/dlm/reader"
 	"github.com/arash-jafarpour/dlm/ui"
-
 	"github.com/spf13/cobra"
 )
 
@@ -61,14 +59,8 @@ func queueAdd(ctx *Context, url string) error {
 		return errors.New("URL cannot be empty")
 	}
 
-	f, err := os.OpenFile(ctx.Config.QueueFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("failed to open queue file: %w", err)
-	}
-	defer f.Close()
-
-	if _, err := fmt.Fprintln(f, url); err != nil {
-		return fmt.Errorf("failed to write to queue: %w", err)
+	if err := newQueueStore(ctx).append(url); err != nil {
+		return err
 	}
 
 	fmt.Printf("%s %s\n", ui.Green("✓ added to queue:"), url)
@@ -76,23 +68,17 @@ func queueAdd(ctx *Context, url string) error {
 }
 
 func queueList(ctx *Context) error {
-	lf, err := reader.ReadLinks(ctx.Config.QueueFile)
+	urls, err := readLinksFile(ctx.Config.QueueFile)
 	if err != nil {
-		// errors.Is unwraps through FileError; a missing queue file is
-		// simply an empty queue, not a failure.
-		if errors.Is(err, os.ErrNotExist) {
-			fmt.Println("queue is empty")
-			return nil
-		}
-		return fmt.Errorf("failed to read queue: %w", err)
+		return err
 	}
 
-	if len(lf.Links) == 0 {
+	if len(urls) == 0 {
 		fmt.Println("queue is empty")
 		return nil
 	}
 
-	for i, link := range lf.Links {
+	for i, link := range urls {
 		fmt.Printf("%d. %s\n", i+1, link)
 	}
 	return nil
@@ -103,18 +89,18 @@ func queueClear(ctx *Context) error {
 }
 
 func queueClearWithConfirm(ctx *Context, requireConfirm bool) error {
-	lf, err := reader.ReadLinks(ctx.Config.QueueFile)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("failed to read queue: %w", err)
+	urls, err := readLinksFile(ctx.Config.QueueFile)
+	if err != nil {
+		return err
 	}
 
-	if lf == nil || len(lf.Links) == 0 {
+	if len(urls) == 0 {
 		fmt.Println("queue is already empty")
 		return nil
 	}
 
 	if requireConfirm {
-		fmt.Printf("This will remove %d item(s) from the queue. Continue? [y/N]: ", len(lf.Links))
+		fmt.Printf("This will remove %d item(s) from the queue. Continue? [y/N]: ", len(urls))
 		var input string
 		_, _ = fmt.Scanln(&input) // prompt; an empty/failed input falls through to the [y/N] default
 		input = strings.ToLower(strings.TrimSpace(input))

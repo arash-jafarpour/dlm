@@ -16,6 +16,7 @@ var configKeys = []string{
 	"completed_file",
 	"output_dir",
 	"num_chunks",
+	"queue_jobs",
 	"insecure_skip_verify",
 }
 
@@ -125,6 +126,16 @@ func setConfig(ctx *Context, key, value string) error {
 			return err
 		}
 		ctx.Config.NumChunks = chunks
+
+	case "queue_jobs":
+		jobs, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("queue_jobs must be a valid integer: %w", err)
+		}
+		if err := config.ValidateQueueJobs(jobs); err != nil {
+			return err
+		}
+		ctx.Config.QueueJobs = jobs
 
 	case "insecure_skip_verify":
 		if err := config.ValidateInsecureSkipVerify(value); err != nil {

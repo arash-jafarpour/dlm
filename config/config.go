@@ -9,11 +9,14 @@ import (
 )
 
 type Config struct {
-	NumChunks             int           `json:"num_chunks"`
-	InsecureSkipVerify    bool          `json:"insecure_skip_verify"`
-	OutputDir             string        `json:"output_dir"`
-	QueueFile             string        `json:"queue_file"`
-	CompletedFile         string        `json:"completed_file"`
+	NumChunks          int    `json:"num_chunks"`
+	InsecureSkipVerify bool   `json:"insecure_skip_verify"`
+	OutputDir          string `json:"output_dir"`
+	QueueFile          string `json:"queue_file"`
+	CompletedFile      string `json:"completed_file"`
+	// QueueJobs is how many queue downloads run concurrently; 1 keeps the
+	// classic sequential behavior.
+	QueueJobs             int           `json:"queue_jobs"`
 	MaxRetries            int           `json:"-"`
 	DialTimeout           time.Duration `json:"-"`
 	KeepAlive             time.Duration `json:"-"`
@@ -40,6 +43,7 @@ func Default() *Config {
 
 	return &Config{
 		NumChunks:             8,
+		QueueJobs:             1,
 		InsecureSkipVerify:    false,
 		OutputDir:             downloadsDir,
 		QueueFile:             queueFilePath,

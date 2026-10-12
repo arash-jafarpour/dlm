@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -68,13 +69,20 @@ func New(cfg *config.Config, rep Reporter) *Downloader {
 	}
 }
 
-func (d *Downloader) Download(urlStr string) (bool, error) {
+func (d *Downloader) Download(ctx context.Context, urlStr string) (bool, error) {
 	var lastErr error
 	var completed bool
 	for attempt := 1; ; attempt++ {
-		completed, lastErr = d.doDownload(urlStr)
+		if err := ctx.Err(); err != nil {
+			// User/system initiated stop: never retry it.
+			return false, apperrors.MarkPermanent(err)
+		}
+		completed, lastErr = d.doDownload(ctx, urlStr)
 		if lastErr == nil {
 			return completed, nil
+		}
+		if errors.Is(lastErr, context.Canceled) || errors.Is(lastErr, context.DeadlineExceeded) {
+			return false, apperrors.MarkPermanent(lastErr)
 		}
 		if !apperrors.IsRetryable(lastErr) {
 			return false, lastErr // permanent error, stop immediately
@@ -83,8 +91,21 @@ func (d *Downloader) Download(urlStr string) (bool, error) {
 			return false, lastErr
 		}
 		d.Reporter.Retry(attempt, lastErr)
-		d.sleepBackoff(attempt, lastErr)
+		d.sleepCtx(ctx, attempt, lastErr)
 	}
+}
+
+// WithReporter returns a shallow copy of the downloader with rep installed.
+// HTTP transport and settings are shared; only bars and notifications
+// differ. Parallel queue mode uses it to run bar-free while the reporter
+// attached by the root command keeps serving single-file commands.
+func (d *Downloader) WithReporter(rep Reporter) *Downloader {
+	cp := *d
+	if rep == nil {
+		rep = noopReporter{}
+	}
+	cp.Reporter = rep
+	return &cp
 }
 
 // backoffFor returns the wait before retrying the given attempt number:
@@ -116,11 +137,17 @@ func (d *Downloader) backoffDelay(attempt int, err error) time.Duration {
 	return delay
 }
 
-func (d *Downloader) sleepBackoff(attempt int, err error) {
-	time.Sleep(d.backoffDelay(attempt, err))
+// sleepCtx sleeps the backoff delay but returns early when the context is
+// canceled, so a stop request takes effect between attempts too.
+func (d *Downloader) sleepCtx(ctx context.Context, attempt int, err error) {
+	delay := d.backoffDelay(attempt, err)
+	select {
+	case <-ctx.Done():
+	case <-time.After(delay):
+	}
 }
 
-func (d *Downloader) doDownload(urlStr string) (bool, error) {
+func (d *Downloader) doDownload(ctx context.Context, urlStr string) (bool, error) {
 	if err := os.MkdirAll(d.OutputDir, 0o755); err != nil {
 		return false, apperrors.WrapFileError(d.OutputDir, "mkdir", err)
 	}
@@ -130,6 +157,7 @@ func (d *Downloader) doDownload(urlStr string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	req = req.WithContext(ctx)
 	resp, err := d.Client.Do(req)
 
 	// If HEAD fails (network) or is rejected by the server (>=400), try a
@@ -139,6 +167,7 @@ func (d *Downloader) doDownload(urlStr string) (bool, error) {
 			resp.Body.Close()
 		}
 		req, _ = d.newRequest("GET", urlStr)
+		req = req.WithContext(ctx)
 		resp, err = d.Client.Do(req)
 		if err != nil || (resp != nil && resp.StatusCode >= 400) {
 			// A rejected fallback must surface as a proper status error
@@ -176,9 +205,9 @@ func (d *Downloader) doDownload(urlStr string) (bool, error) {
 	supportsRanges := rangeSupport && totalSize > 0
 
 	if supportsRanges {
-		return d.chunkedDownload(urlStr, fileName, totalSize)
+		return d.chunkedDownload(ctx, urlStr, fileName, totalSize)
 	}
-	return d.streamDownload(urlStr, fileName, totalSize)
+	return d.streamDownload(ctx, urlStr, fileName, totalSize)
 }
 
 func checkExistingFile(path string, expectedSize int64) (exists bool, size int64, complete bool) {
@@ -215,7 +244,11 @@ func verifyContentRange(cr string, start, end int64) error {
 }
 
 // chunkedDownload splits the file into numChunks parallel range requests
-func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (bool, error) {
+func (d *Downloader) chunkedDownload(
+	ctx context.Context,
+	urlStr, fileName string,
+	totalSize int64,
+) (bool, error) {
 	output := filepath.Join(d.OutputDir, fileName)
 
 	_, currentSize, complete := checkExistingFile(output, totalSize)
@@ -250,7 +283,7 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 		wg.Add(1)
 		go func(index int, s, e int64, path string) {
 			defer wg.Done()
-			err := d.chunkWithRetries(urlStr, index, s, e, path, bar)
+			err := d.chunkWithRetries(ctx, urlStr, index, s, e, path, bar)
 			results <- result{index: index, err: err}
 		}(i, start, end, tmpPath)
 	}
@@ -283,6 +316,7 @@ func (d *Downloader) chunkedDownload(urlStr, fileName string, totalSize int64) (
 // error is marked permanent so the outer Download loop does not restart the
 // entire download just to hit the same failure again.
 func (d *Downloader) chunkWithRetries(
+	ctx context.Context,
 	urlStr string,
 	index int,
 	start, end int64,
@@ -290,7 +324,10 @@ func (d *Downloader) chunkWithRetries(
 	bar ProgressBar,
 ) error {
 	for attempt := 1; ; attempt++ {
-		err := d.downloadChunk(urlStr, start, end, path, bar)
+		err := d.downloadChunk(ctx, urlStr, start, end, path, bar)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return apperrors.MarkPermanent(err)
+		}
 		if err == nil {
 			return nil
 		}
@@ -301,12 +338,13 @@ func (d *Downloader) chunkWithRetries(
 			return apperrors.MarkPermanent(err)
 		}
 		d.Reporter.ChunkRetry(index, attempt, err)
-		d.sleepBackoff(attempt, err)
+		d.sleepCtx(ctx, attempt, err)
 	}
 }
 
 // download a single chunk
 func (d *Downloader) downloadChunk(
+	ctx context.Context,
 	urlStr string,
 	start, end int64,
 	path string,
@@ -332,6 +370,7 @@ func (d *Downloader) downloadChunk(
 
 	// Set Range header
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	req = req.WithContext(ctx)
 
 	resp, err := d.Client.Do(req)
 	if err != nil {
@@ -386,7 +425,11 @@ func (d *Downloader) downloadChunk(
 }
 
 // streamDownload is the fallback single-stream path
-func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (bool, error) {
+func (d *Downloader) streamDownload(
+	ctx context.Context,
+	urlStr, fileName string,
+	totalSize int64,
+) (bool, error) {
 	output := filepath.Join(d.OutputDir, fileName)
 
 	_, existingSize, complete := checkExistingFile(output, totalSize)
@@ -405,6 +448,7 @@ func (d *Downloader) streamDownload(urlStr, fileName string, totalSize int64) (b
 	if existingSize > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existingSize))
 	}
+	req = req.WithContext(ctx)
 
 	resp, err := d.Client.Do(req)
 	if err != nil {
