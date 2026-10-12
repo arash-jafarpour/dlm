@@ -78,7 +78,9 @@ func queueAdd(ctx *Context, url string) error {
 func queueList(ctx *Context) error {
 	lf, err := reader.ReadLinks(ctx.Config.QueueFile)
 	if err != nil {
-		if os.IsNotExist(err) {
+		// errors.Is unwraps through FileError; a missing queue file is
+		// simply an empty queue, not a failure.
+		if errors.Is(err, os.ErrNotExist) {
 			fmt.Println("queue is empty")
 			return nil
 		}
@@ -102,7 +104,7 @@ func queueClear(ctx *Context) error {
 
 func queueClearWithConfirm(ctx *Context, requireConfirm bool) error {
 	lf, err := reader.ReadLinks(ctx.Config.QueueFile)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to read queue: %w", err)
 	}
 

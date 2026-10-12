@@ -118,6 +118,7 @@ func newRootCmd(state *appState) *cobra.Command {
 		newDownloadCmd(state.ctx),
 		newCompletedCmd(state.ctx),
 		newConfigCmd(state.ctx),
+		newUICmd(state.ctx),
 		newVersionCmd(),
 		newUpdateCmd(),
 	)

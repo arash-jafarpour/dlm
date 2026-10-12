@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -59,6 +60,17 @@ func TestQueueList(t *testing.T) {
 	}
 	if err := queueList(ctx); err != nil {
 		t.Fatalf("queueList failed: %v", err)
+	}
+}
+
+func TestQueueListMissingFileIsEmptyQueue(t *testing.T) {
+	cfg := config.Default()
+	cfg.QueueFile = filepath.Join(t.TempDir(), "does-not-exist.txt")
+	ctx := &Context{Config: cfg}
+
+	// A missing queue file must read as "queue is empty", not an error.
+	if err := queueList(ctx); err != nil {
+		t.Fatalf("queueList with missing file: %v", err)
 	}
 }
 

@@ -120,6 +120,18 @@ dlm download queue --no-progress
 Both work on every command. Independently of the flags, the progress bar
 also auto-silences when stdout is not a terminal (pipes, redirects, cron).
 
+### UI Snapshot
+
+Show a plain-text dashboard snapshot (queue, completed, downloads dir,
+settings):
+
+```bash
+dlm ui
+```
+
+The interactive board (live progress, pause/resume) is planned for the v0.6
+release; until then `dlm ui` renders a non-interactive snapshot.
+
 ## File Locations
 
 DLM stores its files in standard system locations:
