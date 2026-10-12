@@ -16,3 +16,12 @@ func CleanFileName(name string) string {
 	}
 	return strings.TrimSpace(name)
 }
+
+// FileName renders the file-name part of a URL for display: the last path
+// segment, percent-decoded, without any query string.
+func FileName(rawURL string) string {
+	if i := strings.LastIndexByte(rawURL, '/'); i >= 0 {
+		rawURL = rawURL[i+1:]
+	}
+	return CleanFileName(rawURL)
+}

@@ -61,59 +61,55 @@ func runUI(ctx *Context, inline bool) error {
 	return runBoard(ctx, urls, snapshot, inline)
 }
 
-// runBoard starts the queue run and hands the terminal to the bubbletea
-// board. Quitting the board cancels the run context: active transfers stop
+// runBoard starts the controllable queue run and hands the terminal to the
+// bubbletea board. Quitting cancels the run context: active transfers stop
 // at their next context check and partial .part files remain for resume.
 func runBoard(ctx *Context, urls []string, settings string, inline bool) error {
-	completedLines := completedHistoryLines(ctx.Config.CompletedFile)
-
-	model := tui.NewModel(tui.Options{
-		QueueURLs: urls,
-		Completed: completedLines,
-		Settings:  settings,
-		Jobs:      maxJobs(ctx.Config.QueueJobs),
-	})
-
 	opts := []tea.ProgramOption{}
 	if !inline {
 		opts = append(opts, tea.WithAltScreen())
 	}
-	prog := tea.NewProgram(model, opts...)
 
-	// The engine keeps running while the board lives; quitting the board
-	// cancels it (parts remain resumable).
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
 
+	var (
+		prog  *tea.Program
+		sched *Scheduler
+	)
 	quit := make(chan struct{})
 	send := func(msg any) {
+		if prog == nil {
+			return
+		}
 		select {
 		case <-quit:
-			// Program is gone; nothing to report to.
 		default:
 			prog.Send(msg)
 		}
 	}
 
-	store := newQueueStore(ctx)
-	run := &QueueRun{
-		Ctx:   ctx,
-		Store: store,
-		URLs:  urls,
-		Jobs:  maxJobs(ctx.Config.QueueJobs),
-		NewReporter: func() downloader.Reporter {
-			return tui.NewBoardReporter(send)
+	sched = NewScheduler(
+		ctx,
+		newQueueStore(ctx),
+		urls,
+		maxJobs(ctx.Config.QueueJobs),
+		func(id int) downloader.Reporter { return tui.NewBoardReporter(id, send) },
+		func(msg tui.JobStateMsg) { send(msg) },
+	)
+
+	model := tui.NewModel(tui.Options{
+		QueueURLs: urls,
+		Completed: completedHistoryLines(ctx.Config.CompletedFile),
+		Settings:  settings,
+		Jobs:      maxJobs(ctx.Config.QueueJobs),
+		OnControl: func(jobID int, action tui.ControlAction) {
+			sched.Control(jobID, action)
 		},
-		OnFileDone: func(_ string, err error, rep downloader.Reporter) {
-			if err == nil {
-				return
-			}
-			if br, ok := rep.(*tui.BoardReporter); ok {
-				br.Fail(err)
-			}
-		},
-	}
-	finished := run.Start(runCtx)
+	})
+	prog = tea.NewProgram(model, opts...)
+
+	finished := sched.Start(runCtx)
 	go func() {
 		<-finished
 		send(tui.RunFinishedMsg{})
@@ -168,17 +164,18 @@ func uiSnapshot(ctx *Context) (string, error) {
 				fmt.Fprintf(&b, "            … and %d more\n", len(lf.Links)-5)
 				break
 			}
-			fmt.Fprintf(&b, "            %d. %s\n", i+1, link)
+			fmt.Fprintf(&b, "            %d. %s\n", i+1, ui.FileName(link))
 		}
 	}
 
 	// Completed history: count and the most recent entries. Lines are
-	// "timestamp | url" as written by markCompleted.
+	// "timestamp | url" as written by markCompleted; only the file name is
+	// worth showing.
 	if data, err := os.ReadFile(ctx.Config.CompletedFile); err == nil && len(data) > 0 {
 		lines := nonEmptyLines(string(data))
 		fmt.Fprintf(&b, "completed:  %s\n", ui.Bold(fmt.Sprintf("%d downloads", len(lines))))
 		for i := len(lines) - 1; i >= 0 && i >= len(lines)-3; i-- {
-			fmt.Fprintf(&b, "            %s\n", truncateLine(lines[i], 64))
+			fmt.Fprintf(&b, "            %s\n", completedLineForDisplay(lines[i]))
 		}
 	} else {
 		fmt.Fprintf(&b, "completed:  %s\n", ui.Gray("none"))
@@ -246,6 +243,16 @@ func nonEmptyLines(data string) []string {
 		}
 	}
 	return lines
+}
+
+// completedLineForDisplay turns a "<timestamp> | <url>" history line into
+// "<timestamp> | <file name>"; unrecognized lines pass through.
+func completedLineForDisplay(line string) string {
+	ts, url, ok := strings.Cut(line, "|")
+	if !ok {
+		return truncateLine(line, 64)
+	}
+	return strings.TrimSpace(ts) + " | " + ui.FileName(strings.TrimSpace(url))
 }
 
 // truncateLine shortens a line, keeping its tail (the URL part of

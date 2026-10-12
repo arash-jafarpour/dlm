@@ -8,11 +8,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const (
-	rowLabelWidth = 26
-	rowBarWidth   = 24
-)
-
 var (
 	StyleTitle       = lipgloss.NewStyle().Bold(true)
 	StyleDim         = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
@@ -26,8 +21,10 @@ var (
 )
 
 // renderRow draws one live progress line, shaped like the plain-CLI rows so
-// the board feels like the same tool.
-func renderRow(r *Row) string {
+// the board feels like the same tool. Label and bar widths come from the
+// terminal layout; maxWidth (<=0 = unlimited) lets the ETA be dropped when
+// the line would not fit.
+func renderRow(r *Row, labelW, barW, maxWidth int) string {
 	current := r.Current()
 	elapsed := time.Since(r.Start).Seconds()
 	var speed float64
@@ -36,10 +33,10 @@ func renderRow(r *Row) string {
 	}
 
 	label := r.Label
-	if len(label) > rowLabelWidth {
-		label = label[:rowLabelWidth-1] + "…"
+	if len(label) > labelW {
+		label = label[:labelW-1] + "…"
 	}
-	label = fmt.Sprintf("%-*s", rowLabelWidth, label)
+	label = fmt.Sprintf("%-*s", labelW, label)
 
 	var bar string
 	percent := 100.0
@@ -52,16 +49,23 @@ func renderRow(r *Row) string {
 			pct = 1
 		}
 		percent = pct * 100
-		filled := int(percent / 100 * rowBarWidth)
+		filled := int(percent / 100 * float64(barW))
 		bar = StyleBarFull.Render(strings.Repeat("█", filled)) +
-			StyleBarEmpty.Render(strings.Repeat("░", rowBarWidth-filled))
+			StyleBarEmpty.Render(strings.Repeat("░", barW-filled))
 	} else {
-		bar = StyleBarEmpty.Render(strings.Repeat("·", rowBarWidth))
+		bar = StyleBarEmpty.Render(strings.Repeat("·", barW))
 	}
+
+	// Row cells besides label+bar: marker(2) + the percent/counters/speed
+	// block (41) and, when it fits, an ETA (~9 more).
+	const fixedCells = 41
+	const etaCells = 9
 
 	var eta string
 	if r.Total > 0 && speed > 0 && current < r.Total {
-		if secs := float64(r.Total-current) / speed; secs >= 1 {
+		secs := float64(r.Total-current) / speed
+		fits := maxWidth <= 0 || 2+labelW+barW+fixedCells+etaCells <= maxWidth
+		if secs >= 1 && fits {
 			eta = "  ETA " + humanETA(secs)
 		}
 	}

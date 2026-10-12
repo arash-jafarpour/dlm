@@ -1,6 +1,7 @@
 // Package tui implements the interactive `dlm ui` board: a live view over a
-// queue run with per-file progress rows, built on bubbletea. It only ever
-// runs on a real terminal; the plain snapshot path lives in cmd.
+// queue run with per-file progress rows and playback controls, built on
+// bubbletea. It only ever runs on a real terminal; the plain snapshot path
+// lives in cmd.
 package tui
 
 import (
@@ -19,12 +20,11 @@ type Tab int
 
 const (
 	TabDownloads Tab = iota
-	TabQueue
 	TabCompleted
 	TabSettings
 )
 
-var tabNames = []string{"downloads", "queue", "completed", "settings"}
+var tabNames = []string{"downloads", "completed", "settings"}
 
 // RowStatus is a row's lifecycle state.
 type RowStatus int
@@ -33,12 +33,18 @@ const (
 	RowRunning RowStatus = iota
 	RowSaved
 	RowFailed
+	RowPaused
+	RowCancelled
+	// RowQueued is a file waiting for a worker slot. Every queued file is
+	// shown from the start; queue_jobs decides how many turn RowRunning.
+	RowQueued
 )
 
 // Row is one file's slot in the downloads panel. Byte counts are updated
 // from worker goroutines through atomics; every other field is written only
 // from the model's Update (single goroutine).
 type Row struct {
+	ID     int
 	Label  string
 	Total  int64
 	Start  time.Time
@@ -48,8 +54,9 @@ type Row struct {
 	current atomic.Int64
 }
 
-func newRow(label string, total, offset int64) *Row {
+func newRow(id int, label string, total, offset int64) *Row {
 	r := &Row{
+		ID:    id,
 		Label: ui.CleanFileName(label),
 		Total: total,
 		Start: time.Now(),
@@ -67,14 +74,32 @@ func (r *Row) Done() {}
 
 func (r *Row) Current() int64 { return r.current.Load() }
 
-// Options carries the static snapshots the board shows on its non-live tabs
-// plus the run shape for the header.
+// ControlAction is a playback control the board can issue for a job.
+type ControlAction int
+
+const (
+	ControlPause ControlAction = iota
+	ControlResume
+	ControlRetry
+	ControlCancel
+)
+
+// Options carries the static snapshots the board shows on its non-live tabs,
+// the run shape, and the control hook back into the engine.
 type Options struct {
-	QueueURLs []string // pending queue as loaded at start
-	Completed []string // completed-history lines
-	Settings  string   // settings tab body (the snapshot text)
+	QueueURLs []string
+	Completed []string
+	Settings  string
 	Jobs      int
+
+	// OnControl is called when the user issues a playback control for a job.
+	// A nil hook renders the board read-only (tests).
+	OnControl func(jobID int, action ControlAction)
 }
+
+// defaultVisibleRows is the fallback window when the terminal size is not
+// known yet (before the first WindowSizeMsg).
+const defaultVisibleRows = 10
 
 // Model is the board's bubbletea model.
 type Model struct {
@@ -82,19 +107,64 @@ type Model struct {
 	tab  Tab
 
 	rows     []*Row
-	static   []string // lines without a live row (already-complete, etc.)
-	warnings []string // most recent warnings, capped
+	static   []string
+	warnings []string
 
-	doneCount   int
-	failedCount int
-	runFinished bool
+	selected     int
+	scrollOffset int
+	runFinished  bool
 
 	width  int
 	height int
 }
 
+// windowSize is how many list rows fit on screen: terminal height minus the
+// chrome (header, tabs, separator, warnings, footer). Falls back to a fixed
+// default until the terminal reports its size.
+func (m Model) windowSize() int {
+	if m.height <= 0 {
+		return defaultVisibleRows
+	}
+	n := m.height - 7 - 2*len(m.warnings)
+	if n < 3 {
+		n = 3
+	}
+	return n
+}
+
+// rowLayout derives label and bar widths from the terminal width so rows
+// fit the screen: the row format after the bar needs ~41 cells (percent,
+// byte counters, speed) plus up to 9 for an ETA string, and the selection
+// marker adds 2 more.
+func (m Model) rowLayout() (labelW, barW int) {
+	w := m.width
+	if w <= 0 {
+		w = 100
+	}
+	labelW = clampInt(w/3, 16, 34)
+	barW = clampInt(w-labelW-52, 8, 40)
+	return labelW, barW
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
 func NewModel(opts Options) Model {
-	return Model{opts: opts, width: 100, height: 30}
+	m := Model{opts: opts, width: 100, height: 30}
+	// Every queued file is visible from the start, in queue order: the
+	// board is the queue. queue_jobs decides which rows go live.
+	for i, u := range opts.QueueURLs {
+		m.rows = append(m.rows, newRow(i, ui.FileName(u), 0, 0))
+		m.rows[i].Status = RowQueued
+	}
+	return m
 }
 
 // ---------------------------------------------------------------------------
@@ -104,14 +174,25 @@ func NewModel(opts Options) Model {
 type tickMsg struct{}
 
 // FileStartedMsg announces a row for a file whose transfer began.
-type FileStartedMsg struct{ Row *Row }
+type FileStartedMsg struct {
+	ID  int
+	Row *Row
+}
 
-// FileDoneMsg settles a file. Row is nil when the download failed before
-// producing a row (e.g. metadata failure); Text then carries the line.
+// FileDoneMsg settles a file that produced a row (saved / already-complete).
 type FileDoneMsg struct {
-	Row    *Row
-	Text   string
-	Failed bool
+	Row  *Row
+	Text string
+}
+
+// JobStateMsg reports an engine-side state change for a job that did not
+// finish with a saved file: paused, cancelled, or failed (the latter also
+// covers failures before any row existed, hence Label).
+type JobStateMsg struct {
+	ID     int
+	Label  string
+	State  RowStatus
+	Detail string
 }
 
 // WarnMsg is a transient note (retry chatter) shown above the footer.
@@ -140,26 +221,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd() // periodic repaint: byte counters are atomics
 
 	case FileStartedMsg:
-		m.rows = append(m.rows, msg.Row)
+		// A live transfer (re)opens the run: retries after a finished
+		// summary must flip the footer back to running.
+		m.runFinished = false
+		if row := m.rowByID(msg.ID); row != nil {
+			// The queued slot adopts the live row so byte updates land in
+			// the right place, position preserved.
+			m.replaceRow(row, msg.Row)
+		} else {
+			m.rows = append(m.rows, msg.Row)
+		}
 		return m, nil
 
 	case FileDoneMsg:
-		if msg.Row == nil {
-			if msg.Text != "" {
-				m.static = append(m.static, msg.Text)
-			}
-		} else if msg.Failed {
-			msg.Row.Status = RowFailed
-			msg.Row.Detail = msg.Text
-		} else {
+		if msg.Row != nil {
 			msg.Row.Status = RowSaved
 			msg.Row.Detail = msg.Text
+		} else if msg.Text != "" {
+			m.static = append(m.static, msg.Text)
 		}
-		if msg.Failed {
-			m.failedCount++
-		} else {
-			m.doneCount++
+		return m, nil
+
+	case JobStateMsg:
+		row := m.rowByID(msg.ID)
+		if row == nil {
+			row = newRow(msg.ID, msg.Label, 0, 0) // no transfer ever began
+			m.rows = append(m.rows, row)
 		}
+		row.Status = msg.State
+		row.Detail = msg.Detail
 		return m, nil
 
 	case WarnMsg:
@@ -174,25 +264,110 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "esc", "ctrl+c":
-			return m, tea.Quit
-		case "tab", "right", "l":
-			m.tab = (m.tab + 1) % Tab(len(tabNames))
-		case "shift+tab", "left", "h":
-			m.tab = (m.tab + Tab(len(tabNames)) - 1) % Tab(len(tabNames))
-		case "1", "2", "3", "4":
-			m.tab = Tab(msg.String()[0] - '1')
-		}
-		return m, nil
+		return m.handleKey(msg)
 	}
 	return m, nil
 }
 
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc", "ctrl+c":
+		return m, tea.Quit
+	case "tab", "right", "l":
+		m.tab = (m.tab + 1) % Tab(len(tabNames))
+	case "shift+tab", "left", "h":
+		m.tab = (m.tab + Tab(len(tabNames)) - 1) % Tab(len(tabNames))
+	case "1", "2", "3", "4":
+		m.tab = Tab(msg.String()[0] - '1')
+	case "down", "j":
+		m.moveSelection(1)
+	case "up", "k":
+		m.moveSelection(-1)
+	case " ":
+		m.controlSelected(func(row *Row) ControlAction {
+			if row.Status == RowPaused {
+				return ControlResume
+			}
+			return ControlPause
+		})
+	case "r":
+		m.controlSelected(func(*Row) ControlAction { return ControlRetry })
+	case "x":
+		m.controlSelected(func(*Row) ControlAction { return ControlCancel })
+	}
+	return m, nil
+}
+
+func (m *Model) moveSelection(delta int) {
+	if len(m.rows) == 0 {
+		m.selected = 0
+		return
+	}
+	m.selected = (m.selected + delta + len(m.rows)) % len(m.rows)
+	m.ensureSelectionVisible()
+}
+
+// ensureSelectionVisible scrolls the window so the selected row is inside
+// the visible slice.
+func (m *Model) ensureSelectionVisible() {
+	window := m.windowSize()
+	if m.selected < m.scrollOffset {
+		m.scrollOffset = m.selected
+	}
+	if m.selected >= m.scrollOffset+window {
+		m.scrollOffset = m.selected - window + 1
+	}
+
+	maxOffset := len(m.rows) - window
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.scrollOffset > maxOffset {
+		m.scrollOffset = maxOffset
+	}
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	}
+}
+
+func (m *Model) controlSelected(action func(row *Row) ControlAction) {
+	if m.opts.OnControl == nil || len(m.rows) == 0 {
+		return
+	}
+	if m.selected >= len(m.rows) {
+		m.selected = len(m.rows) - 1
+	}
+	row := m.rows[m.selected]
+	m.opts.OnControl(row.ID, action(row))
+}
+
+func (m Model) rowByID(id int) *Row {
+	for _, r := range m.rows {
+		if r.ID == id {
+			return r
+		}
+	}
+	return nil
+}
+
+func (m *Model) replaceRow(old, fresh *Row) {
+	for i, r := range m.rows {
+		if r == old {
+			fresh.Status = RowRunning
+			m.rows[i] = fresh
+			return
+		}
+	}
+	m.rows = append(m.rows, fresh)
+}
+
+// ---------------------------------------------------------------------------
+// View
+// ---------------------------------------------------------------------------
+
 func (m Model) View() string {
 	var b strings.Builder
 
-	// Header
 	header := StyleTitle.Render("dlm") + StyleDim.Render("  interactive ui")
 	workerWord := "workers"
 	if m.opts.Jobs == 1 {
@@ -201,7 +376,6 @@ func (m Model) View() string {
 	right := StyleDim.Render(fmt.Sprintf("%d %s · %d files", m.opts.Jobs, workerWord, len(m.opts.QueueURLs)))
 	b.WriteString(padBetween(header, right, m.width) + "\n")
 
-	// Tab bar
 	var tabs []string
 	for i, name := range tabNames {
 		if Tab(i) == m.tab {
@@ -216,22 +390,21 @@ func (m Model) View() string {
 	switch m.tab {
 	case TabDownloads:
 		b.WriteString(m.viewDownloads())
-	case TabQueue:
-		b.WriteString(m.viewList(m.opts.QueueURLs, "queue is empty"))
 	case TabCompleted:
 		b.WriteString(m.viewList(m.opts.Completed, "no completed downloads yet"))
 	case TabSettings:
-		b.WriteString(m.opts.Settings)
+		b.WriteString(m.clipBlock(m.opts.Settings))
 	}
 
-	// Footer: warnings, then status + key help.
 	for _, w := range m.warnings {
 		b.WriteString("\n" + StyleWarn.Render(w))
 	}
 	b.WriteString("\n" + StyleDim.Render("─") + "\n")
-	if m.runFinished {
-		summary := fmt.Sprintf("run finished — %d saved, %d failed", m.doneCount, m.failedCount)
-		if m.failedCount > 0 {
+
+	saved, failed := m.counts()
+	if m.finished() {
+		summary := fmt.Sprintf("run finished — %d saved, %d failed", saved, failed)
+		if failed > 0 {
 			b.WriteString(StyleErr.Render(summary))
 		} else {
 			b.WriteString(StyleOK.Render(summary))
@@ -239,11 +412,41 @@ func (m Model) View() string {
 	} else {
 		b.WriteString(StyleDim.Render(fmt.Sprintf(
 			"running %d/%d files · %d saved, %d failed",
-			m.runningCount(), len(m.opts.QueueURLs), m.doneCount, m.failedCount,
+			m.runningCount(), len(m.opts.QueueURLs), saved, failed,
 		)))
 	}
-	b.WriteString("\n" + StyleDim.Render("q quit · tab/←→ switch · 1-4 jump · pause/resume/retry land in M2"))
+	b.WriteString("\n" + StyleDim.Render("space pause/resume · r retry · x cancel · tab switch · q quit"))
 	return b.String()
+}
+
+// finished reports whether every known job reached a terminal state. Paused
+// rows keep the run open: they are resumable.
+func (m Model) finished() bool {
+	if m.runFinished {
+		return true
+	}
+	if len(m.rows) == 0 {
+		return false
+	}
+	for _, r := range m.rows {
+		switch r.Status {
+		case RowRunning, RowQueued, RowPaused:
+			return false
+		}
+	}
+	return true
+}
+
+func (m Model) counts() (saved, failed int) {
+	for _, r := range m.rows {
+		switch r.Status {
+		case RowSaved:
+			saved++
+		case RowFailed:
+			failed++
+		}
+	}
+	return saved, failed
 }
 
 func (m Model) runningCount() int {
@@ -258,22 +461,45 @@ func (m Model) runningCount() int {
 
 func (m Model) viewDownloads() string {
 	if len(m.rows) == 0 && len(m.static) == 0 {
-		if m.runFinished {
-			return StyleDim.Render("nothing downloaded in this run") + "\n"
-		}
 		return StyleDim.Render("waiting for the first transfer…") + "\n"
 	}
 
 	var b strings.Builder
-	for _, r := range m.rows {
+
+	window := m.windowSize()
+	labelW, barW := m.rowLayout()
+
+	end := m.scrollOffset + window
+	if end > len(m.rows) {
+		end = len(m.rows)
+	}
+	if m.scrollOffset > 0 {
+		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▲ %d more above", m.scrollOffset)) + "\n")
+	}
+	for i := m.scrollOffset; i < end; i++ {
+		r := m.rows[i]
+		marker := "  "
+		if i == m.selected {
+			marker = StyleTabActive.Render("▸ ")
+		}
 		switch r.Status {
 		case RowRunning:
-			b.WriteString(renderRow(r) + "\n")
+			b.WriteString(marker + renderRow(r, labelW, barW, m.width) + "\n")
+		case RowQueued:
+			b.WriteString(marker + StyleDim.Render("· waiting  "+r.Label) + "\n")
 		case RowSaved:
-			b.WriteString(r.Detail + "\n")
+			b.WriteString(marker + r.Detail + "\n")
 		case RowFailed:
-			b.WriteString(StyleErr.Render(r.Detail) + "\n")
+			b.WriteString(marker + StyleErr.Render("✗ failed  "+r.Label) +
+				StyleDim.Render("  "+r.Detail) + "\n")
+		case RowPaused:
+			b.WriteString(marker + StyleWarn.Render("⏸ paused (space resumes)  ") + StyleDim.Render(r.Label) + "\n")
+		case RowCancelled:
+			b.WriteString(marker + StyleDim.Render("⊘ cancelled  "+r.Label) + "\n")
 		}
+	}
+	if end < len(m.rows) {
+		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(m.rows)-end)) + "\n")
 	}
 	for _, line := range m.static {
 		b.WriteString(line + "\n")
@@ -285,15 +511,44 @@ func (m Model) viewList(items []string, empty string) string {
 	if len(items) == 0 {
 		return StyleDim.Render(empty) + "\n"
 	}
+	window := m.windowSize()
 	var b strings.Builder
 	for i, item := range items {
-		if i >= m.height-6 && m.height > 0 {
-			b.WriteString(StyleDim.Render(fmt.Sprintf("… and %d more", len(items)-i)) + "\n")
+		if i >= window {
+			b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below  (full list: dlm completed)", len(items)-i)) + "\n")
 			break
 		}
-		b.WriteString("  " + ui.CleanFileName(item) + "\n")
+		b.WriteString("  " + truncateDisplay(ui.CleanFileName(item), m.contentWidth()-4) + "\n")
 	}
 	return b.String()
+}
+
+// contentWidth is the usable line width for list/body content.
+func (m Model) contentWidth() int {
+	if m.width <= 0 {
+		return 100
+	}
+	return m.width
+}
+
+// clipBlock limits a multi-line body (settings) to the visible window.
+func (m Model) clipBlock(text string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	window := m.windowSize()
+	if len(lines) <= window {
+		return strings.Join(lines, "\n") + "\n"
+	}
+	shown := lines[:window-1]
+	shown = append(shown, StyleDim.Render(fmt.Sprintf("… %d more lines", len(lines)-window+1)))
+	return strings.Join(shown, "\n") + "\n"
+}
+
+// truncateDisplay shortens a plain (unstyled) string to max visible cells.
+func truncateDisplay(s string, max int) string {
+	if max < 4 || len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
 }
 
 // padBetween puts left and right on one line filling width.

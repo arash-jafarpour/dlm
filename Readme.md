@@ -123,8 +123,9 @@ also auto-silences when stdout is not a terminal (pipes, redirects, cron).
 ### Interactive UI
 
 On a real terminal with a non-empty queue, `dlm ui` opens the interactive
-board: a live row per file with its own progress bar, plus tabs for the
-queue, completed history, and settings.
+board: **one page listing every queued file** in queue order — `queue_jobs`
+decides how many of them download at once (the rest show `· waiting`), and
+active rows carry their own live progress bar.
 
 ```
 dlm ui                 # interactive board (alternate screen)
@@ -132,9 +133,19 @@ dlm ui --inline        # draw inline instead of the alternate screen
 dlm ui | cat           # not a terminal: prints the snapshot instead
 ```
 
-Keys: `q`/`esc` quit · `tab`/`←`/`→` switch tabs · `1`–`4` jump · quitting
-cancels the run (partial downloads remain resumable). Pause/resume/retry
-are planned for the next milestone.
+Only file names are shown, never the raw URLs.
+
+Keys: `space` pause/resume the selected row · `r` retry · `x` cancel ·
+`j`/`k` or `↑`/`↓` select and scroll · `tab`/`←`/`→` switch tabs · `1`–`3`
+jump (downloads / completed / settings) · `q` quit. Pausing cancels the
+transfer in place: the partial `.part` file stays on disk, so resuming
+continues from the exact byte. Quitting cancels the whole run the same way
+(nothing is lost, everything resumes).
+
+The downloads page shows a window sized to the terminal; `j`/`k` scroll it
+(`▲ N more above` / `▼ N more below` markers show what is out of view). The
+completed list and settings body use the same window and width, so every
+page adapts to the terminal size.
 
 When stdout is not a terminal, or the queue is empty, `dlm ui` prints a
 plain snapshot (queue, completed, downloads dir, settings) and exits.

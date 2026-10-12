@@ -30,8 +30,8 @@ func update(m Model, msg tea.Msg) Model {
 func TestBoardShowsRunningRow(t *testing.T) {
 	m := newTestModel()
 
-	row := newRow("FAB%20-%2022.mkv", 1000, 0)
-	m = update(m, FileStartedMsg{Row: row})
+	row := newRow(0, "FAB%20-%2022.mkv", 1000, 0)
+	m = update(m, FileStartedMsg{ID: row.ID, Row: row})
 	row.Add(250)
 
 	view := m.View()
@@ -49,13 +49,13 @@ func TestBoardShowsRunningRow(t *testing.T) {
 func TestBoardSettlesRowsWithStatus(t *testing.T) {
 	m := newTestModel()
 
-	saved := newRow("a.mkv", 10, 0)
-	failed := newRow("b.mkv", 10, 0)
-	m = update(m, FileStartedMsg{Row: saved})
-	m = update(m, FileStartedMsg{Row: failed})
+	saved := newRow(0, "a.mkv", 10, 0)
+	failed := newRow(1, "b.mkv", 10, 0)
+	m = update(m, FileStartedMsg{ID: saved.ID, Row: saved})
+	m = update(m, FileStartedMsg{ID: failed.ID, Row: failed})
 
 	m = update(m, FileDoneMsg{Row: saved, Text: "✓ saved → /tmp/a.mkv"})
-	m = update(m, FileDoneMsg{Row: failed, Text: "✗ failed: timeout", Failed: true})
+	m = update(m, JobStateMsg{ID: failed.ID, State: RowFailed, Detail: "timeout"})
 
 	if saved.Status != RowSaved || failed.Status != RowFailed {
 		t.Fatalf("statuses not applied: saved=%v failed=%v", saved.Status, failed.Status)
@@ -63,20 +63,200 @@ func TestBoardSettlesRowsWithStatus(t *testing.T) {
 
 	m = update(m, RunFinishedMsg{})
 	view := m.View()
-	for _, want := range []string{"✓ saved → /tmp/a.mkv", "✗ failed: timeout", "1 saved, 1 failed"} {
+	for _, want := range []string{"✓ saved → /tmp/a.mkv", "✗ failed  b.mkv", "timeout", "1 saved, 1 failed"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("%q missing from view:\n%s", want, view)
 		}
 	}
 }
 
-func TestBoardPreRowFailureBecomesStaticLine(t *testing.T) {
+func TestBoardPreRowFailureCreatesFailedRow(t *testing.T) {
 	m := newTestModel()
-	m = update(m, FileDoneMsg{Text: "✗ failed: no route to host", Failed: true})
+	m = update(m, JobStateMsg{
+		ID: 7, Label: "ghost.mkv", State: RowFailed,
+		Detail: "no route to host",
+	})
 
 	view := m.View()
-	if !strings.Contains(view, "✗ failed: no route to host") {
-		t.Fatalf("static failure line missing:\n%s", view)
+	for _, want := range []string{"ghost.mkv", "no route to host", "✗ failed"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("%q missing:\n%s", want, view)
+		}
+	}
+}
+
+func TestBoardSelectionAndControls(t *testing.T) {
+	var gotID int
+	var gotAction ControlAction
+	opts := Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv"},
+		Jobs:      2,
+		OnControl: func(id int, action ControlAction) { gotID, gotAction = id, action },
+	}
+	m := NewModel(opts)
+
+	rowA := newRow(0, "a.mkv", 10, 0)
+	rowB := newRow(1, "b.mkv", 10, 0)
+	m = update(m, FileStartedMsg{ID: 0, Row: rowA})
+	m = update(m, FileStartedMsg{ID: 1, Row: rowB})
+
+	// Selection starts at the first row; j moves down.
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = update(m, tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	if gotID != 1 || gotAction != ControlPause {
+		t.Fatalf("space on running row: got id=%d action=%v, want pause on job 1", gotID, gotAction)
+	}
+
+	// Pause reflects in the row and space then means resume.
+	m = update(m, JobStateMsg{ID: 1, State: RowPaused})
+	if !strings.Contains(m.View(), "paused") {
+		t.Fatalf("paused row not rendered:\n%s", m.View())
+	}
+	m = update(m, tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	if gotID != 1 || gotAction != ControlResume {
+		t.Fatalf("space on paused row: got id=%d action=%v, want resume on job 1", gotID, gotAction)
+	}
+
+	// x cancels, r retries the selected row.
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if gotAction != ControlCancel {
+		t.Fatalf("x: got %v, want cancel", gotAction)
+	}
+	update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if gotAction != ControlRetry {
+		t.Fatalf("r: got %v, want retry", gotAction)
+	}
+}
+
+func TestBoardPausedRowKeepsRunOpen(t *testing.T) {
+	m := newTestModel()
+	done := newRow(0, "done.mkv", 10, 0)
+	paused := newRow(1, "paused.mkv", 10, 0)
+	m = update(m, FileStartedMsg{ID: 0, Row: done})
+	m = update(m, FileStartedMsg{ID: 1, Row: paused})
+	m = update(m, FileDoneMsg{Row: done, Text: "✓ saved → /tmp/done.mkv"})
+	m = update(m, JobStateMsg{ID: 1, State: RowPaused})
+
+	if m.finished() {
+		t.Fatal("a paused job must keep the run open (it is resumable)")
+	}
+	if !strings.Contains(m.View(), "running 0/2 files") {
+		t.Errorf("footer should not claim completion:\n%s", m.View())
+	}
+}
+
+func TestBoardScrollingWindow(t *testing.T) {
+	urls := make([]string, 25)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("https://x/file-%02d.mkv", i)
+	}
+	m := NewModel(Options{QueueURLs: urls, Jobs: 2})
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 17}) // window of 10 rows
+
+	view := m.View()
+	if !strings.Contains(view, "file-00.mkv") || !strings.Contains(view, "file-09.mkv") {
+		t.Fatalf("first window must show rows 0-9:\n%s", view)
+	}
+	if strings.Contains(view, "file-10.mkv") {
+		t.Fatalf("row 10 must be outside the window:\n%s", view)
+	}
+	if !strings.Contains(view, "▼ 15 more below") {
+		t.Fatalf("bottom indicator missing:\n%s", view)
+	}
+	if strings.Contains(view, "▲") {
+		t.Fatalf("nothing is above the first window:\n%s", view)
+	}
+
+	// Scrolling down moves the window and shows the above-indicator.
+	for i := 0; i < 11; i++ {
+		m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	}
+	view = m.View()
+	if m.selected != 11 || m.scrollOffset != 2 {
+		t.Fatalf("selection=%d offset=%d, want 11/2", m.selected, m.scrollOffset)
+	}
+	if !strings.Contains(view, "▲ 2 more above") {
+		t.Fatalf("top indicator missing:\n%s", view)
+	}
+	if strings.Contains(view, "file-00.mkv") {
+		t.Fatalf("scrolled-out rows must not render:\n%s", view)
+	}
+
+	// Scrolling to the bottom clamps the window and hides the bottom
+	// indicator.
+	for i := 0; i < 14; i++ {
+		m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	}
+	if m.selected != 0 { // wrapped around to the top
+		t.Fatalf("selection wrap: got %d, want 0", m.selected)
+	}
+	if m.scrollOffset != 0 {
+		t.Fatalf("window must snap back to the top on wrap, got offset %d", m.scrollOffset)
+	}
+
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}) // wrap up
+	if m.selected != len(urls)-1 {
+		t.Fatalf("selection = %d, want %d", m.selected, len(urls)-1)
+	}
+	view = m.View()
+	if !strings.Contains(view, "file-24.mkv") {
+		t.Fatalf("last row must be visible after wrap:\n%s", view)
+	}
+	if strings.Contains(view, "▼") {
+		t.Fatalf("nothing is below the last window:\n%s", view)
+	}
+	if !strings.Contains(view, "▲ 15 more above") {
+		t.Fatalf("top indicator for the last window:\n%s", view)
+	}
+}
+
+// TestBoardWindowAdaptsToTerminalHeight: the visible row count follows the
+// terminal height instead of a fixed 10.
+func TestBoardWindowAdaptsToTerminalHeight(t *testing.T) {
+	urls := make([]string, 25)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("https://x/file-%02d.mkv", i)
+	}
+
+	// Short terminal: fewer rows, bottom marker counts the rest.
+	short := NewModel(Options{QueueURLs: urls, Jobs: 2})
+	short = update(short, tea.WindowSizeMsg{Width: 120, Height: 12})
+	view := short.View()
+	if !strings.Contains(view, "file-04.mkv") || strings.Contains(view, "file-05.mkv") {
+		t.Fatalf("height 12 should show 5 rows:\n%s", view)
+	}
+	if !strings.Contains(view, "▼ 20 more below") {
+		t.Fatalf("bottom marker wrong for height 12:\n%s", view)
+	}
+
+	// Tall terminal: everything fits, no markers.
+	tall := NewModel(Options{QueueURLs: urls, Jobs: 2})
+	tall = update(tall, tea.WindowSizeMsg{Width: 120, Height: 40})
+	view = tall.View()
+	if !strings.Contains(view, "file-24.mkv") {
+		t.Fatalf("tall terminal must show every row:\n%s", view)
+	}
+	if strings.Contains(view, "▲") || strings.Contains(view, "▼") {
+		t.Fatalf("no scroll markers expected when all rows fit:\n%s", view)
+	}
+}
+
+// TestBoardRowsFitTerminalWidth: label and bar widths derive from the
+// terminal width so a full row (marker included) never overflows.
+func TestBoardRowsFitTerminalWidth(t *testing.T) {
+	for _, width := range []int{80, 100, 140} {
+		m := NewModel(Options{QueueURLs: []string{"https://x/very-long-file-name-that-should-truncate.mkv"}, Jobs: 1})
+		m = update(m, tea.WindowSizeMsg{Width: width, Height: 30})
+
+		labelW, barW := m.rowLayout()
+		row := newRow(0, "very-long-file-name-that-should-truncate.mkv", 200, 0)
+		row.Start = time.Now().Add(-2 * time.Second)
+		row.Add(100)
+
+		line := renderRow(row, labelW, barW, width)
+		if got := lipglossWidth(line) + 2; got > width { // +2 for "▸ "
+			t.Errorf("width %d: row is %d cells wide, overflows", width, got)
+		}
 	}
 }
 
@@ -98,14 +278,14 @@ func TestBoardTabSwitching(t *testing.T) {
 	m := newTestModel()
 
 	m = update(m, tea.KeyMsg{Type: tea.KeyTab})
-	if m.tab != TabQueue {
-		t.Fatalf("tab = %v, want queue", m.tab)
+	if m.tab != TabCompleted {
+		t.Fatalf("tab = %v, want completed", m.tab)
 	}
-	if !strings.Contains(m.View(), "FAB - 22.mkv") {
-		t.Errorf("queue tab must list pending files:\n%s", m.View())
+	if !strings.Contains(m.View(), "FAB-21.mkv") {
+		t.Errorf("completed tab must list history:\n%s", m.View())
 	}
 
-	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
 	if m.tab != TabSettings {
 		t.Fatalf("tab = %v, want settings", m.tab)
 	}
@@ -119,12 +299,55 @@ func TestBoardTabSwitching(t *testing.T) {
 	}
 }
 
+// TestBoardShowsWholeQueueUpFront is the M2.5 requirement: one page lists
+// every queued file (names only, queue order); queue_jobs decides which of
+// them are live.
+func TestBoardShowsWholeQueueUpFront(t *testing.T) {
+	m := NewModel(Options{
+		QueueURLs: []string{
+			"https://x/FAB%20-%2022.mkv",
+			"https://x/FAB%20-%2023.mkv",
+			"https://x/FAB%20-%2024.mkv",
+		},
+		Jobs: 2,
+	})
+
+	view := m.View()
+	for _, want := range []string{"FAB - 22.mkv", "FAB - 23.mkv", "FAB - 24.mkv"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("%q must be visible before any transfer starts:\n%s", want, view)
+		}
+	}
+	if !strings.Contains(view, "waiting") {
+		t.Fatalf("queued files must show as waiting:\n%s", view)
+	}
+	if strings.Contains(view, "http") {
+		t.Fatalf("URLs must never be shown, only names:\n%s", view)
+	}
+
+	// The second queued file goes live; it keeps its position, the others
+	// stay waiting and visible.
+	live := newRow(1, "FAB%20-%2023.mkv", 1000, 0)
+	live.Add(250)
+	m = update(m, FileStartedMsg{ID: 1, Row: live})
+	view = m.View()
+	if !strings.Contains(view, "25.0%") {
+		t.Fatalf("live row must show progress:\n%s", view)
+	}
+	if strings.Index(view, "FAB - 22.mkv") > strings.Index(view, "FAB - 23.mkv") {
+		t.Errorf("queue order must be preserved:\n%s", view)
+	}
+	if !strings.Contains(view, "waiting") {
+		t.Errorf("untouched files must remain waiting:\n%s", view)
+	}
+}
+
 func TestBoardHeaderCounts(t *testing.T) {
 	m := newTestModel()
 	if m.opts.Jobs != 2 {
 		t.Fatalf("fixture jobs = %d", m.opts.Jobs)
 	}
-	m = update(m, FileStartedMsg{Row: newRow("x.mkv", 10, 0)})
+	m = update(m, FileStartedMsg{ID: 0, Row: newRow(0, "x.mkv", 10, 0)})
 
 	view := m.View()
 	if !strings.Contains(view, "2 workers · 2 files") {
@@ -155,11 +378,11 @@ func TestBoardQuitKeys(t *testing.T) {
 }
 
 func TestBoardRowSpeedAndETA(t *testing.T) {
-	row := newRow("f.mkv", 200, 0)
+	row := newRow(0, "f.mkv", 200, 0)
 	row.Start = time.Now().Add(-2 * time.Second) // 2s elapsed
 	row.Add(100)
 
-	line := renderRow(row)
+	line := renderRow(row, 26, 24, 0)
 	if !strings.Contains(line, "/s") {
 		t.Errorf("speed missing: %s", line)
 	}
@@ -168,9 +391,9 @@ func TestBoardRowSpeedAndETA(t *testing.T) {
 	}
 
 	// Unknown size renders without percentage but stays a valid line.
-	unknown := newRow("u.mkv", 0, 0)
+	unknown := newRow(0, "u.mkv", 0, 0)
 	unknown.Add(10)
-	if line := renderRow(unknown); !strings.Contains(line, "u.mkv") {
+	if line := renderRow(unknown, 26, 24, 0); !strings.Contains(line, "u.mkv") {
 		t.Errorf("unknown-size row broken: %s", line)
 	}
 }
