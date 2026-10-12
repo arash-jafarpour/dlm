@@ -63,3 +63,7 @@ changelog:
 
 release:
   draft: false
+  # Re-releasing the same tag (e.g. after moving it) hits GitHub's 422
+  # already_exists because asset names carry no version. On that error,
+  # delete the conflicting asset and retry the upload.
+  replace_existing_artifacts: true

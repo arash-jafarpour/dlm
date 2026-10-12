@@ -120,17 +120,24 @@ dlm download queue --no-progress
 Both work on every command. Independently of the flags, the progress bar
 also auto-silences when stdout is not a terminal (pipes, redirects, cron).
 
-### UI Snapshot
+### Interactive UI
 
-Show a plain-text dashboard snapshot (queue, completed, downloads dir,
-settings):
+On a real terminal with a non-empty queue, `dlm ui` opens the interactive
+board: a live row per file with its own progress bar, plus tabs for the
+queue, completed history, and settings.
 
-```bash
-dlm ui
+```
+dlm ui                 # interactive board (alternate screen)
+dlm ui --inline        # draw inline instead of the alternate screen
+dlm ui | cat           # not a terminal: prints the snapshot instead
 ```
 
-The interactive board (live progress, pause/resume) is planned for the v0.6
-release; until then `dlm ui` renders a non-interactive snapshot.
+Keys: `q`/`esc` quit · `tab`/`←`/`→` switch tabs · `1`–`4` jump · quitting
+cancels the run (partial downloads remain resumable). Pause/resume/retry
+are planned for the next milestone.
+
+When stdout is not a terminal, or the queue is empty, `dlm ui` prints a
+plain snapshot (queue, completed, downloads dir, settings) and exits.
 
 ## File Locations
 

@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"net/url"
-	"strings"
 
 	"github.com/arash-jafarpour/dlm/downloader"
 	"github.com/arash-jafarpour/dlm/ui"
@@ -90,7 +88,7 @@ func (r *parallelReporter) Progress(total int64, label string, offset int64) dow
 		return silentBar{} // quiet stays terminal-silent as always
 	}
 	// Strip percent-encoding so users see the real file name.
-	r.row = r.mgr.AddRow(total, cleanFileName(label), offset)
+	r.row = r.mgr.AddRow(total, ui.CleanFileName(label), offset)
 	return r.row
 }
 
@@ -131,16 +129,4 @@ func (r *parallelReporter) finishError(err error) {
 	} else {
 		r.mgr.Line(line)
 	}
-}
-
-// cleanFileName renders percent-encoded URL names as human names, dropping
-// any query string ("FAB%20-%2012" → "FAB - 12.mkv").
-func cleanFileName(name string) string {
-	if i := strings.IndexByte(name, '?'); i >= 0 {
-		name = name[:i]
-	}
-	if decoded, err := url.PathUnescape(name); err == nil && decoded != "" {
-		name = decoded
-	}
-	return strings.TrimSpace(name)
 }

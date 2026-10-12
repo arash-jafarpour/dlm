@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/arash-jafarpour/dlm/downloader"
 	"github.com/arash-jafarpour/dlm/ui"
@@ -141,40 +140,24 @@ func downloadQueueParallel(
 		mgr.Line(ui.Cyan(fmt.Sprintf("→ downloading %d files (%d workers)", len(urls), jobs)))
 	}
 
-	var wg sync.WaitGroup
-	urlCh := make(chan string)
-
-	for w := 0; w < jobs; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for url := range urlCh {
-				rep := &parallelReporter{mgr: mgr, quiet: ctx.Quiet}
-				// Swap the per-job reporter in instead of the CLI-shared
-				// one; shares the same HTTP transport either way.
-				runner := DownloadRunner(ctx.Downloader)
-				if concrete, ok := runner.(*downloader.Downloader); ok {
-					runner = concrete.WithReporter(rep)
-				}
-
-				completed, err := runner.Download(context.Background(), url)
-				if err != nil {
-					rep.finishError(err)
-					continue
-				}
-				if completed {
-					if storeErr := store.completeAndRemove(url); storeErr != nil {
-						mgr.Line(fmt.Sprintf("%s %v", ui.Yellow("⚠ couldn't record completed download:"), storeErr))
-					}
-				}
+	run := &QueueRun{
+		Ctx:   ctx,
+		Store: store,
+		URLs:  urls,
+		Jobs:  jobs,
+		NewReporter: func() downloader.Reporter {
+			return &parallelReporter{mgr: mgr, quiet: ctx.Quiet}
+		},
+		OnFileDone: func(_ string, err error, rep downloader.Reporter) {
+			if err == nil {
+				return
 			}
-		}()
+			if pr, ok := rep.(*parallelReporter); ok {
+				pr.finishError(err)
+			}
+		},
 	}
 
-	for _, url := range urls {
-		urlCh <- url
-	}
-	close(urlCh)
-	wg.Wait()
+	<-run.Start(context.Background())
 	return nil
 }

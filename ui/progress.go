@@ -66,6 +66,11 @@ func isTerminal(f *os.File) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
+// IsTerminal reports whether f is a real terminal; exported for callers
+// that need the same judgment outside this package (e.g. the ui command's
+// interactive/snapshot dispatch).
+func IsTerminal(f *os.File) bool { return isTerminal(f) }
+
 func (b *Bar) Add(n int) {
 	b.current.Add(int64(n))
 }
