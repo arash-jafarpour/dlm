@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 
@@ -61,6 +62,116 @@ func runUI(ctx *Context, inline bool) error {
 	return runBoard(ctx, urls, snapshot, inline)
 }
 
+// boardQueue binds the board's queue-editing hooks to the queue file and
+// the scheduler, keeping a URL↔job-id map so both stay in sync. All methods
+// are called from the board's single Update goroutine.
+type boardQueue struct {
+	store *queueStore
+	sched *Scheduler
+	warn  func(string)
+
+	idsByURL map[string]int
+	urlByID  map[int]string
+}
+
+func newBoardQueue(store *queueStore, sched *Scheduler, urls []string, warn func(string)) *boardQueue {
+	b := &boardQueue{
+		store:    store,
+		sched:    sched,
+		warn:     warn,
+		idsByURL: map[string]int{},
+		urlByID:  map[int]string{},
+	}
+	for i, u := range urls {
+		b.idsByURL[u] = i
+		b.urlByID[i] = u
+	}
+	return b
+}
+
+// add stores URLs and registers them with the engine, returning their ids.
+func (b *boardQueue) add(urls []string) []int {
+	ids := make([]int, 0, len(urls))
+	for _, u := range urls {
+		id, ok := b.sched.Add(u)
+		if !ok {
+			continue
+		}
+		if err := b.store.append(u); err != nil {
+			b.warn(err.Error())
+		}
+		b.idsByURL[u] = id
+		b.urlByID[id] = u
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// delete removes a job and its queue-file line.
+func (b *boardQueue) delete(id int) {
+	url, ok := b.urlByID[id]
+	if !ok {
+		return
+	}
+	if err := b.store.remove(url); err != nil {
+		b.warn(err.Error())
+	}
+	b.sched.Remove(id)
+	delete(b.idsByURL, url)
+	delete(b.urlByID, id)
+}
+
+// reorder persists the queue file in display order and updates the engine's
+// flow priority.
+func (b *boardQueue) reorder(ids []int) {
+	urls := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if u, ok := b.urlByID[id]; ok {
+			urls = append(urls, u)
+		}
+	}
+	if err := b.store.rewrite(urls); err != nil {
+		b.warn(err.Error())
+	}
+	b.sched.Reorder(ids)
+}
+
+// reload reconciles board jobs with the queue file after an external edit:
+// surviving URLs keep their ids, new ones are added, vanished ones removed.
+func (b *boardQueue) reload() []tui.JobRef {
+	urls, err := readLinksFile(b.store.queueFile)
+	if err != nil {
+		b.warn(err.Error())
+		return nil
+	}
+
+	seen := map[string]bool{}
+	jobs := make([]tui.JobRef, 0, len(urls))
+	for _, u := range urls {
+		seen[u] = true
+		id, ok := b.idsByURL[u]
+		if !ok {
+			newID, added := b.sched.Add(u)
+			if !added {
+				continue
+			}
+			b.idsByURL[u] = newID
+			b.urlByID[newID] = u
+			id = newID
+		}
+		jobs = append(jobs, tui.JobRef{ID: id, URL: u})
+	}
+
+	for u, id := range b.idsByURL {
+		if !seen[u] {
+			b.sched.Remove(id)
+			delete(b.urlByID, id)
+			delete(b.idsByURL, u)
+		}
+	}
+	return jobs
+}
+
 // runBoard starts the controllable queue run and hands the terminal to the
 // bubbletea board. Quitting cancels the run context: active transfers stop
 // at their next context check and partial .part files remain for resume.
@@ -98,6 +209,10 @@ func runBoard(ctx *Context, urls []string, settings string, inline bool) error {
 		func(msg tui.JobStateMsg) { send(msg) },
 	)
 
+	bq := newBoardQueue(newQueueStore(ctx), sched, urls, func(text string) {
+		send(tui.WarnMsg{Text: text})
+	})
+
 	model := tui.NewModel(tui.Options{
 		QueueURLs: urls,
 		Completed: completedDisplayLines(ctx.Config.CompletedFile),
@@ -105,6 +220,22 @@ func runBoard(ctx *Context, urls []string, settings string, inline bool) error {
 		Jobs:      maxJobs(ctx.Config.QueueJobs),
 		OnControl: func(jobID int, action tui.ControlAction) {
 			sched.Control(jobID, action)
+		},
+		OnAdd:     bq.add,
+		OnDelete:  bq.delete,
+		OnReorder: bq.reorder,
+		OnOpenEditor: func() tea.Cmd {
+			editor := os.Getenv("EDITOR")
+			if editor == "" {
+				editor = "vi"
+			}
+			cmd := exec.Command(editor, ctx.Config.QueueFile)
+			return tea.ExecProcess(cmd, func(err error) tea.Msg {
+				if err != nil {
+					return tui.WarnMsg{Text: fmt.Sprintf("editor: %v", err)}
+				}
+				return tui.QueueReloadMsg{Jobs: bq.reload()}
+			})
 		},
 	})
 	prog = tea.NewProgram(model, opts...)

@@ -279,6 +279,48 @@ func TestSchedulerStopAllReturnsToHeld(t *testing.T) {
 	waitFor(t, "run finished", func() bool { return closed(rig.done) })
 }
 
+func TestSchedulerAddRemoveReorder(t *testing.T) {
+	first := "https://x/1"
+	runner := newBlockRunner()
+	rig, _ := newSchedRig(t, []string{first}, 1, runner)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	rig.done = rig.sched.Start(runCtx)
+
+	// Add two jobs at runtime.
+	id2, ok := rig.sched.Add("https://x/2")
+	if !ok {
+		t.Fatal("Add refused")
+	}
+	id3, ok := rig.sched.Add("https://x/3")
+	if !ok || id3 == id2 {
+		t.Fatalf("second Add: id=%d ok=%v", id3, ok)
+	}
+
+	// Reorder: 3, 1, 2 — flowing mode must honour that priority.
+	rig.sched.Reorder([]int{id3, 0, id2})
+	rig.sched.Control(-1, tui.ControlStartAll)
+	waitFor(t, "reordered head runs first", func() bool { return runner.count("https://x/3") == 1 })
+	if runner.count(first) != 0 {
+		t.Fatal("one worker must serialize the reordered queue")
+	}
+
+	// Remove the running head: the next (by new order) takes over.
+	rig.sched.Remove(id3)
+	waitFor(t, "next by order runs", func() bool { return runner.count(first) == 1 })
+
+	// Remove a held job: it must never start.
+	rig.sched.Remove(id2)
+	time.Sleep(150 * time.Millisecond)
+	if runner.count("https://x/2") != 0 {
+		t.Fatal("removed job started")
+	}
+
+	rig.sched.Control(0, tui.ControlCancel)
+	waitFor(t, "run finished", func() bool { return closed(rig.done) })
+}
+
 func TestSchedulerPauseResumeRerunsJob(t *testing.T) {
 	url := "https://example.com/FAB.mkv"
 	runner := newBlockRunner()

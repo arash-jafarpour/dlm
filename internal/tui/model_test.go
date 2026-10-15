@@ -384,6 +384,160 @@ func TestSpaceOnStartingRowPutsItBackToHeld(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Queue editing (M3)
+// ---------------------------------------------------------------------------
+
+func TestParseURLList(t *testing.T) {
+	got := parseURLList("  https://a/1\nhttps://b/2   notaurl\n\thttp://c/3 ")
+	want := []string{"https://a/1", "https://b/2", "http://c/3"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestBoardAddFlow(t *testing.T) {
+	var added []string
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv"},
+		Jobs:      1,
+		OnAdd: func(urls []string) []int {
+			added = urls
+			return []int{10, 11}
+		},
+	})
+
+	// 'a' opens the input line; esc cancels without adding.
+	_ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if !m.inputActive {
+		t.Fatal("a must open the add line")
+	}
+	m = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.inputActive || len(added) != 0 {
+		t.Fatal("esc must cancel the add line")
+	}
+
+	// Typing and enter adds; pasted whitespace-separated blocks work.
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("https://x/new1.mkv")})
+	m = update(m, tea.KeyMsg{Type: tea.KeySpace})
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("https://x/new2.mkv")})
+	m = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if len(added) != 2 || added[0] != "https://x/new1.mkv" || added[1] != "https://x/new2.mkv" {
+		t.Fatalf("added = %v", added)
+	}
+	if len(m.rows) != 3 {
+		t.Fatalf("rows = %d, want 3 (1 initial + 2 new)", len(m.rows))
+	}
+	if m.rows[2].Status != RowQueued {
+		t.Errorf("new rows must be held, got status %v", m.rows[2].Status)
+	}
+	if !strings.Contains(m.View(), "new2.mkv") {
+		t.Errorf("new row must render:\n%s", m.View())
+	}
+}
+
+func TestBoardDeleteSelected(t *testing.T) {
+	var deleted int
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv"},
+		Jobs:      1,
+		OnDelete:  func(id int) { deleted = id },
+	})
+
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}) // select b
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+
+	if deleted != 1 {
+		t.Fatalf("deleted id = %d, want 1", deleted)
+	}
+	if len(m.rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(m.rows))
+	}
+	view := m.View()
+	if strings.Contains(view, "b.mkv") {
+		t.Errorf("deleted row still rendered:\n%s", view)
+	}
+	if !strings.Contains(view, "c.mkv") {
+		t.Errorf("later rows must survive:\n%s", view)
+	}
+}
+
+func TestBoardReorderSelected(t *testing.T) {
+	var order []int
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv"},
+		Jobs:      1,
+		OnReorder: func(ids []int) { order = ids },
+	})
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}) // select b (id 1)
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'K'}}) // move up
+
+	if len(order) != 3 || order[0] != 1 || order[1] != 0 || order[2] != 2 {
+		t.Fatalf("order = %v, want [1 0 2]", order)
+	}
+	if m.selected != 0 {
+		t.Fatalf("selection must follow the moved row, got %d", m.selected)
+	}
+	view := m.View()
+	if strings.Index(view, "b.mkv") > strings.Index(view, "a.mkv") {
+		t.Errorf("rows not reordered in view:\n%s", view)
+	}
+
+	// At the top edge, K is a no-op.
+	update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'K'}})
+	if order[0] != 1 {
+		t.Errorf("K at the top must not reorder: %v", order)
+	}
+}
+
+func TestBoardEditorReload(t *testing.T) {
+	opened := false
+	reloaded := []JobRef{
+		{ID: 0, URL: "https://x/a.mkv"},
+		{ID: 7, URL: "https://x/late.mkv"},
+	}
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv"},
+		Jobs:      1,
+		OnOpenEditor: func() tea.Cmd {
+			opened = true
+			return nil
+		},
+	})
+
+	// Start a transfer so its state must survive the reload.
+	live := newRow(0, "a.mkv", 100, 0)
+	live.Add(40)
+	m = update(m, FileStartedMsg{ID: 0, Row: live})
+
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	if !opened {
+		t.Fatal("o must trigger the editor hook")
+	}
+
+	m = update(m, QueueReloadMsg{Jobs: reloaded})
+	if len(m.rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(m.rows))
+	}
+	if m.rows[0].Status != RowRunning || m.rows[0].ID != 0 {
+		t.Errorf("surviving row must keep its state, got id=%d status=%v", m.rows[0].ID, m.rows[0].Status)
+	}
+	if m.rows[1].ID != 7 || m.rows[1].Status != RowQueued {
+		t.Errorf("new row must be held, got id=%d status=%v", m.rows[1].ID, m.rows[1].Status)
+	}
+	if strings.Contains(m.View(), "b.mkv") {
+		t.Errorf("removed row must disappear:\n%s", m.View())
+	}
+}
+
 func TestBoardWarningsAreCappedAndShown(t *testing.T) {
 	m := newTestModel()
 	for i := 0; i < 5; i++ {

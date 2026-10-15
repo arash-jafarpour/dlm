@@ -29,10 +29,12 @@ const (
 	jobFailed
 	jobDone
 	jobCancelled
+	// jobRemoved left the queue (board delete or editor reconciliation).
+	jobRemoved
 )
 
 func (s jobState) terminal() bool {
-	return s == jobFailed || s == jobDone || s == jobCancelled
+	return s == jobFailed || s == jobDone || s == jobCancelled || s == jobRemoved
 }
 
 type schedJob struct {
@@ -53,20 +55,27 @@ type jobResult struct {
 type controlMsg struct {
 	id     int
 	action tui.ControlAction
+	url    string
+	order  []int
+	reply  chan int
 }
 
 // Scheduler runs a queue with per-job playback control — pause, resume,
-// retry, cancel — powering the interactive board. Pause is implemented as
-// cancel-in-flight: partial .part files remain on disk, so resume simply
-// re-runs the download, which continues from the exact byte.
+// retry, cancel — plus queue editing (add, remove, reorder) for the
+// interactive board. Pause is implemented as cancel-in-flight: partial
+// .part files remain on disk, so resume simply re-runs the download, which
+// continues from the exact byte.
 //
-// All job state lives in one controller goroutine; Control is the only
-// entry point from other goroutines (the board's key handler). The plain
-// CLI keeps the simpler QueueRun, which has no playback semantics.
+// All job state lives in one controller goroutine; Control and its
+// add/remove/reorder siblings are the only entry points from other
+// goroutines (the board's key handler). The plain CLI keeps the simpler
+// QueueRun, which has no playback semantics.
 type Scheduler struct {
-	ctx   *Context
-	store *queueStore
-	jobs  []*schedJob
+	ctx    *Context
+	store  *queueStore
+	jobs   []*schedJob
+	byID   map[int]*schedJob
+	nextID int
 
 	workers  int
 	work     chan *schedJob
@@ -98,6 +107,7 @@ func NewScheduler(
 		ctx:         ctx,
 		store:       store,
 		workers:     workers,
+		byID:        map[int]*schedJob{},
 		work:        make(chan *schedJob, len(urls)+1),
 		results:     make(chan jobResult, len(urls)+1),
 		controls:    make(chan controlMsg, 16),
@@ -106,14 +116,25 @@ func NewScheduler(
 		notify:      notify,
 	}
 	for i, u := range urls {
-		s.jobs = append(s.jobs, &schedJob{
-			id:    i,
-			url:   u,
-			label: tuiLabel(u),
-			state: jobWaiting,
-		})
+		s.addJobLocked(u, i)
+		s.nextID = i + 1
 	}
 	return s
+}
+
+// addJobLocked registers a job. Called from NewScheduler only (before the
+// controller goroutine exists); runtime adds go through ControlAdd so the
+// controller remains the single owner of state.
+func (s *Scheduler) addJobLocked(url string, id int) *schedJob {
+	j := &schedJob{
+		id:    id,
+		url:   url,
+		label: tuiLabel(url),
+		state: jobWaiting,
+	}
+	s.jobs = append(s.jobs, j)
+	s.byID[id] = j
+	return j
 }
 
 // Start launches workers and the controller; the returned channel closes
@@ -143,6 +164,43 @@ func (s *Scheduler) Start(ctx context.Context) <-chan struct{} {
 func (s *Scheduler) Control(id int, action tui.ControlAction) {
 	select {
 	case s.controls <- controlMsg{id: id, action: action}:
+	default:
+	}
+}
+
+// Add registers a new held job and returns its id (false when the board is
+// shutting down). Used by the board's add/editor flows.
+func (s *Scheduler) Add(url string) (int, bool) {
+	reply := make(chan int, 1)
+	select {
+	case s.controls <- controlMsg{action: tui.ControlAdd, url: url, reply: reply}:
+	default:
+		return -1, false
+	}
+	select {
+	case id := <-reply:
+		return id, id >= 0
+	case <-s.done:
+		return -1, false
+	}
+}
+
+// Remove drops a job from the run (cancelling it if active). The queue file
+// is the caller's responsibility (the board removes the line via the
+// store). Used by the board's delete flow.
+func (s *Scheduler) Remove(id int) {
+	select {
+	case s.controls <- controlMsg{id: id, action: tui.ControlRemove}:
+	default:
+	}
+}
+
+// Reorder sets the priority order (the flow order in flowing mode) to the
+// given job ids; ids not listed keep their previous relative order after
+// the listed ones.
+func (s *Scheduler) Reorder(ids []int) {
+	select {
+	case s.controls <- controlMsg{action: tui.ControlReorder, order: ids}:
 	default:
 	}
 }
@@ -285,6 +343,27 @@ func (s *Scheduler) control(ctx context.Context) {
 			dispatch()
 
 		case c := <-s.controls:
+			if c.action == tui.ControlAdd {
+				id := s.nextID
+				s.nextID++
+				j := s.addJobLocked(c.url, id)
+				if autoStart {
+					// Flowing mode: the new file joins the queue behind
+					// the existing ones.
+					j.state = jobQueued
+					queued = append(queued, j)
+					report(j, tui.RowStarting, "")
+					dispatch()
+				}
+				if c.reply != nil {
+					c.reply <- id
+				}
+				continue
+			}
+			if c.action == tui.ControlReorder {
+				s.reorderLocked(c.order)
+				continue
+			}
 			if c.action == tui.ControlStartAll {
 				autoStart = true
 				dispatch()
@@ -313,8 +392,20 @@ func (s *Scheduler) control(ctx context.Context) {
 			if c.id < 0 || c.id >= len(s.jobs) {
 				continue
 			}
-			j := s.jobs[c.id]
+			j := s.byID[c.id]
+			if j == nil {
+				continue
+			}
 			switch c.action {
+			case tui.ControlRemove:
+				j.state = jobRemoved
+				if j.cancel != nil {
+					j.cancel()
+					j.cancel = nil
+				}
+				s.deleteJobLocked(c.id)
+				dispatch()
+				continue
 			case tui.ControlPause:
 				switch j.state {
 				case jobRunning:
@@ -353,4 +444,38 @@ func (s *Scheduler) control(ctx context.Context) {
 // tuiLabel is the file name shown for a job before any transfer exists.
 func tuiLabel(rawURL string) string {
 	return ui.FileName(rawURL)
+}
+
+// deleteJobLocked removes a job from the ordering slices; the job struct is
+// left terminal (jobRemoved) so in-flight results resolve harmlessly.
+func (s *Scheduler) deleteJobLocked(id int) {
+	delete(s.byID, id)
+	for i, j := range s.jobs {
+		if j.id == id {
+			s.jobs = append(s.jobs[:i], s.jobs[i+1:]...)
+			return
+		}
+	}
+}
+
+// reorderLocked rebuilds the job order from the given ids; unknown ids are
+// skipped, unlisted jobs keep their order after the listed ones.
+func (s *Scheduler) reorderLocked(ids []int) {
+	if len(ids) == 0 {
+		return
+	}
+	seen := map[int]bool{}
+	ordered := make([]*schedJob, 0, len(s.jobs))
+	for _, id := range ids {
+		if j := s.byID[id]; j != nil && !seen[id] {
+			ordered = append(ordered, j)
+			seen[id] = true
+		}
+	}
+	for _, j := range s.jobs {
+		if !seen[j.id] {
+			ordered = append(ordered, j)
+		}
+	}
+	s.jobs = ordered
 }

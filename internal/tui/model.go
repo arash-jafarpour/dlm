@@ -95,10 +95,16 @@ const (
 	ControlStart
 	ControlStartAll
 	ControlStopAll
+	// Queue editing: ControlAdd carries a URL, ControlRemove a job id,
+	// ControlReorder the new id order (see Scheduler's methods, which the
+	// board reaches through Options callbacks).
+	ControlAdd
+	ControlRemove
+	ControlReorder
 )
 
 // Options carries the static snapshots the board shows on its non-live tabs,
-// the run shape, and the control hook back into the engine.
+// the run shape, and the hooks back into the engine and the queue file.
 type Options struct {
 	QueueURLs []string
 	Completed []string
@@ -108,6 +114,19 @@ type Options struct {
 	// OnControl is called when the user issues a playback control for a job.
 	// A nil hook renders the board read-only (tests).
 	OnControl func(jobID int, action ControlAction)
+
+	// Queue-editing hooks. Each returns what the model needs to keep its
+	// rows in sync; nil hooks disable the corresponding key.
+	// OnAdd stores the URLs and registers them with the engine, returning
+	// the new job ids (same order).
+	OnAdd func(urls []string) []int
+	// OnDelete removes the job and its queue-file line.
+	OnDelete func(jobID int)
+	// OnReorder persists the new order (job ids in display order).
+	OnReorder func(ids []int)
+	// OnOpenEditor suspends the board and opens the queue file in $EDITOR;
+	// the returned command must deliver a QueueReloadMsg afterwards.
+	OnOpenEditor func() tea.Cmd
 }
 
 // defaultVisibleRows is the fallback window when the terminal size is not
@@ -127,6 +146,10 @@ type Model struct {
 	scrollOffset int
 	runFinished  bool
 	spin         int // advances on every tick; drives the starting spinner
+
+	// Queue-editing input line ('a'): active while the user types URLs.
+	inputActive bool
+	input       string
 
 	width  int
 	height int
@@ -215,6 +238,18 @@ type WarnMsg struct{ Text string }
 // RunFinishedMsg marks the queue run as complete (all files settled).
 type RunFinishedMsg struct{}
 
+// JobRef identifies one engine job (id) and its URL; the model renders the
+// file name.
+type JobRef struct {
+	ID  int
+	URL string
+}
+
+// QueueReloadMsg replaces the board's job list after the queue file was
+// edited externally ($EDITOR). cmd reconciles the engine first and sends
+// the resulting job set.
+type QueueReloadMsg struct{ Jobs []JobRef }
+
 // ---------------------------------------------------------------------------
 // Model plumbing
 // ---------------------------------------------------------------------------
@@ -278,6 +313,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runFinished = true
 		return m, nil
 
+	case QueueReloadMsg:
+		m.applyReload(msg.Jobs)
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -285,6 +324,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The add-input line captures everything until enter/esc.
+	if m.inputActive {
+		return m.handleInputKey(msg)
+	}
+
 	switch msg.String() {
 	case "q", "esc", "ctrl+c":
 		return m, tea.Quit
@@ -292,12 +336,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.tab = (m.tab + 1) % Tab(len(tabNames))
 	case "shift+tab", "left", "h":
 		m.tab = (m.tab + Tab(len(tabNames)) - 1) % Tab(len(tabNames))
-	case "1", "2", "3", "4":
+	case "1", "2", "3":
 		m.tab = Tab(msg.String()[0] - '1')
 	case "down", "j":
 		m.moveSelection(1)
 	case "up", "k":
 		m.moveSelection(-1)
+	case "a":
+		m.inputActive = true
+		m.input = ""
+	case "d":
+		m.deleteSelected()
+	case "J":
+		m.moveSelected(1)
+	case "K":
+		m.moveSelected(-1)
+	case "o":
+		if m.opts.OnOpenEditor != nil {
+			return m, m.opts.OnOpenEditor()
+		}
 	case " ":
 		m.controlSelected(func(row *Row) ControlAction {
 			switch row.Status {
@@ -332,6 +389,89 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.controlSelected(func(*Row) ControlAction { return ControlCancel })
 	}
 	return m, nil
+}
+
+// handleInputKey drives the 'a' add line: printable runes accumulate
+// (pasted blocks may contain several whitespace-separated URLs), enter
+// submits, esc cancels, backspace edits.
+func (m Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.inputActive = false
+		m.input = ""
+	case tea.KeyEnter:
+		urls := parseURLList(m.input)
+		m.inputActive = false
+		m.input = ""
+		if len(urls) > 0 && m.opts.OnAdd != nil {
+			ids := m.opts.OnAdd(urls)
+			for i, id := range ids {
+				if id < 0 || i >= len(urls) {
+					continue
+				}
+				row := newRow(id, ui.FileName(urls[i]), 0, 0)
+				row.Status = RowQueued
+				m.rows = append(m.rows, row)
+			}
+		}
+	case tea.KeyBackspace:
+		if n := len(m.input); n > 0 {
+			m.input = m.input[:n-1]
+		}
+	case tea.KeySpace:
+		m.input += " "
+	case tea.KeyRunes:
+		m.input += string(msg.Runes)
+	}
+	return m, nil
+}
+
+// parseURLList splits typed/pasted text into URLs: any whitespace (spaces,
+// newlines, tabs) separates, and only http(s) entries count.
+func parseURLList(text string) []string {
+	var urls []string
+	for _, field := range strings.Fields(text) {
+		if strings.HasPrefix(field, "http://") || strings.HasPrefix(field, "https://") {
+			urls = append(urls, field)
+		}
+	}
+	return urls
+}
+
+func (m *Model) deleteSelected() {
+	if m.opts.OnDelete == nil || len(m.rows) == 0 {
+		return
+	}
+	if m.selected >= len(m.rows) {
+		m.selected = len(m.rows) - 1
+	}
+	row := m.rows[m.selected]
+	m.opts.OnDelete(row.ID)
+	m.rows = append(m.rows[:m.selected], m.rows[m.selected+1:]...)
+	if m.selected >= len(m.rows) && m.selected > 0 {
+		m.selected--
+	}
+	m.ensureSelectionVisible()
+}
+
+// moveSelected reorders the selected row within the queue.
+func (m *Model) moveSelected(delta int) {
+	if m.opts.OnReorder == nil || len(m.rows) < 2 {
+		return
+	}
+	target := m.selected + delta
+	if target < 0 || target >= len(m.rows) {
+		return
+	}
+	m.rows[m.selected], m.rows[target] = m.rows[target], m.rows[m.selected]
+	m.selected = target
+	m.ensureSelectionVisible()
+
+	ids := make([]int, len(m.rows))
+	for i, r := range m.rows {
+		ids[i] = r.ID
+	}
+	m.opts.OnReorder(ids)
 }
 
 func (m *Model) moveSelection(delta int) {
@@ -437,6 +577,12 @@ func (m Model) View() string {
 	}
 	b.WriteString("\n" + StyleDim.Render("─") + "\n")
 
+	if m.inputActive {
+		b.WriteString(StyleStarting.Render("add url(s): ") + m.input + StyleDim.Render("▏"))
+		b.WriteString(StyleDim.Render("   enter to add · esc to cancel"))
+		return b.String()
+	}
+
 	saved, failed := m.counts()
 	switch {
 	case m.finished():
@@ -462,8 +608,10 @@ func (m Model) View() string {
 		sKey = "s stop all"
 	}
 	b.WriteString("\n" + StyleDim.Render(fmt.Sprintf(
-		"space start/pause · %s · r retry · x cancel · tab switch · q quit", sKey,
+		"space start/pause · %s · r retry · x cancel · a add · d delete · J/K move · o edit",
+		sKey,
 	)))
+	b.WriteString("\n" + StyleDim.Render("tab switch · j/k select · 1-3 tabs · q quit"))
 	return b.String()
 }
 
@@ -633,6 +781,31 @@ func truncateDisplay(s string, max int) string {
 func spinnerFrame(tick int) string {
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	return frames[tick%len(frames)]
+}
+
+// applyReload reconciles the row list with the engine's job set after the
+// queue file was edited externally: rows for surviving jobs keep their
+// state, new jobs are added held, vanished jobs are dropped.
+func (m *Model) applyReload(jobs []JobRef) {
+	prev := make(map[int]*Row, len(m.rows))
+	for _, r := range m.rows {
+		prev[r.ID] = r
+	}
+	rows := make([]*Row, 0, len(jobs))
+	for _, j := range jobs {
+		if row, ok := prev[j.ID]; ok {
+			rows = append(rows, row)
+			continue
+		}
+		row := newRow(j.ID, ui.FileName(j.URL), 0, 0)
+		row.Status = RowQueued
+		rows = append(rows, row)
+	}
+	m.rows = rows
+	if m.selected >= len(m.rows) {
+		m.selected = maxInt(0, len(m.rows)-1)
+	}
+	m.ensureSelectionVisible()
 }
 
 // padBetween puts left and right on one line filling width.

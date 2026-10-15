@@ -95,6 +95,29 @@ func (s *queueStore) appendCompletedLocked(url string) error {
 	return err
 }
 
+// remove drops one URL from the queue (board delete). Best effort: a
+// missing line is not an error.
+func (s *queueStore) remove(url string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.removeLocked(url)
+}
+
+// rewrite replaces the queue contents with urls, in order (board reorder,
+// or reconciliation after an external editor session).
+func (s *queueStore) rewrite(urls []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rewriteLocked(urls)
+}
+
+func (s *queueStore) rewriteLocked(urls []string) error {
+	if len(urls) == 0 {
+		return os.WriteFile(s.queueFile, []byte(""), 0o644)
+	}
+	return os.WriteFile(s.queueFile, []byte(strings.Join(urls, "\n")+"\n"), 0o644)
+}
+
 // removeLocked rewrites the queue file without the URL, preserving the
 // order of the rest.
 func (s *queueStore) removeLocked(url string) error {
@@ -113,8 +136,5 @@ func (s *queueStore) removeLocked(url string) error {
 			kept = append(kept, line)
 		}
 	}
-	if len(kept) == 0 {
-		return os.WriteFile(s.queueFile, []byte(""), 0o644)
-	}
-	return os.WriteFile(s.queueFile, []byte(strings.Join(kept, "\n")+"\n"), 0o644)
+	return s.rewriteLocked(kept)
 }
