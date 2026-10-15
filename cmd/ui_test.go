@@ -365,6 +365,62 @@ func TestUISnapshotEmptyAndMissingStates(t *testing.T) {
 	}
 }
 
+func TestBoardSummaryTotals(t *testing.T) {
+	outDir := t.TempDir()
+	histDir := t.TempDir()
+	cfg := config.Default()
+	cfg.CompletedFile = filepath.Join(histDir, "completed.txt")
+	cfg.OutputDir = outDir
+	cfg.QueueFile = filepath.Join(histDir, "queue.txt")
+
+	lines := []string{
+		"2026-10-15 10:00:00 | https://x/a.mkv | 1048576 | 3s",
+		"2026-10-15 11:00:00 | https://x/b.mkv | 2097152 | 2s",
+		"2026-10-11 10:01:22 | https://x/legacy.mkv", // no size column
+	}
+	if err := os.WriteFile(cfg.CompletedFile, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.QueueFile, []byte("https://x/q1.mkv\nhttps://x/q2.mkv\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "out.bin"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := boardSummary(&Context{Config: cfg})
+	if s.Count != 3 {
+		t.Errorf("Count = %d, want 3", s.Count)
+	}
+	if want := int64(1048576 + 2097152); s.Bytes != want {
+		t.Errorf("Bytes = %d, want %d", s.Bytes, want)
+	}
+	if s.Dir != outDir {
+		t.Errorf("Dir = %q, want %q", s.Dir, outDir)
+	}
+	if s.Files != 1 || s.DirBytes != 5 {
+		t.Errorf("dir stats = %d files, %d bytes, want 1 and 5", s.Files, s.DirBytes)
+	}
+	if s.Pending != 2 {
+		t.Errorf("Pending = %d, want 2", s.Pending)
+	}
+	if !strings.Contains(s.Settings, "chunks=") || !strings.Contains(s.Settings, "queue_jobs=") {
+		t.Errorf("Settings = %q, want a chunks/retries/queue_jobs recap", s.Settings)
+	}
+	if s.Platform == "" {
+		t.Error("Platform must be set")
+	}
+
+	// A missing history/queue/output dir must not error: counts stay zero.
+	cfg.CompletedFile = filepath.Join(histDir, "absent.txt")
+	cfg.QueueFile = filepath.Join(histDir, "absent-queue.txt")
+	cfg.OutputDir = filepath.Join(histDir, "absent-dir")
+	s = boardSummary(&Context{Config: cfg})
+	if s.Count != 0 || s.Bytes != 0 || s.Files != 0 || s.Pending != 0 {
+		t.Errorf("missing paths must read as empty: %+v", s)
+	}
+}
+
 func TestUISnapshotQueueTruncatesAtFive(t *testing.T) {
 	cfg := config.Default()
 	cfg.QueueFile = filepath.Join(t.TempDir(), "queue.txt")

@@ -210,6 +210,12 @@ func runBoard(ctx *Context, urls []string, inline bool) error {
 		Completed: completedDisplayEntries(ctx.Config.CompletedFile),
 		Settings:  settingsRows(ctx.Config),
 		Jobs:      maxJobs(ctx.Config.QueueJobs),
+		Summary:   boardSummary(ctx),
+		OnSummary: func() tea.Cmd {
+			// Recomputed on the cmd side: the roll-up reads the history
+			// file, the queue file, and stats the output directory.
+			return func() tea.Msg { return tui.SummaryMsg{Summary: boardSummary(ctx)} }
+		},
 		OnControl: func(jobID int, action tui.ControlAction) {
 			sched.Control(jobID, action)
 		},
@@ -384,15 +390,23 @@ func uiSnapshot(ctx *Context) (string, error) {
 // downloadsDirSummary describes the downloads directory: file count and
 // total size, "empty"/"missing" instead of errors when it does not matter.
 func downloadsDirSummary(dir string) string {
-	entries, err := os.ReadDir(dir)
+	count, total, err := dirStats(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Sprintf("%s (missing)", dir)
 		}
 		return dir // unreadable: show the plain path
 	}
-	var count int
-	var total int64
+	return fmt.Sprintf("%d files, %s in %s", count, humanBytes(total), dir)
+}
+
+// dirStats counts the files in dir and sums their sizes. Directories are
+// skipped; a missing or unreadable dir returns the error.
+func dirStats(dir string) (count int, total int64, err error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, 0, err
+	}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -402,7 +416,46 @@ func downloadsDirSummary(dir string) string {
 			total += info.Size()
 		}
 	}
-	return fmt.Sprintf("%d files, %s in %s", count, humanBytes(total), dir)
+	return count, total, nil
+}
+
+// boardSummary computes the board's dashboard numbers: totals across the
+// whole history, the output directory's state, the queue depth, and the
+// environment. It is the board-side counterpart of the snapshot's recap and
+// is re-run whenever the completed/summary tab opens, a run finishes, or the
+// user refreshes.
+func boardSummary(ctx *Context) tui.Summary {
+	lines := completedHistoryLines(ctx.Config.CompletedFile)
+	s := tui.Summary{Count: len(lines)}
+	for _, l := range lines {
+		s.Bytes += completedLineSize(l)
+	}
+	s.Dir = ctx.Config.OutputDir
+	if count, total, err := dirStats(s.Dir); err == nil {
+		s.Files, s.DirBytes = count, total
+	}
+	// Queue depth: a missing file reads as empty, matching the snapshot.
+	if urls, err := readLinksFile(ctx.Config.QueueFile); err == nil {
+		s.Pending = len(urls)
+	}
+	s.Settings = fmt.Sprintf("chunks=%d retries=%d queue_jobs=%d",
+		ctx.Config.NumChunks, ctx.Config.MaxRetries, ctx.Config.QueueJobs)
+	s.Platform = runtime.GOOS + "/" + runtime.GOARCH
+	return s
+}
+
+// completedLineSize extracts the byte-size field from a history line, 0
+// when absent or malformed (legacy two-field lines).
+func completedLineSize(line string) int64 {
+	parts := strings.Split(line, "|")
+	if len(parts) < 4 {
+		return 0
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+	if err != nil || size < 0 {
+		return 0
+	}
+	return size
 }
 
 // humanBytes mirrors ui.formatBytes; it is a separate copy because

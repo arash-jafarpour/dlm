@@ -22,9 +22,10 @@ const (
 	TabDownloads Tab = iota
 	TabCompleted
 	TabSettings
+	TabSummary
 )
 
-var tabNames = []string{"downloads", "completed", "settings"}
+var tabNames = []string{"downloads", "completed", "settings", "summary"}
 
 // RowStatus is a row's lifecycle state.
 type RowStatus int
@@ -128,6 +129,23 @@ type HistoryEntry struct {
 	Ref  string
 }
 
+// Summary is the board's dashboard snapshot: the completed-history totals,
+// the output directory's state, the queue depth, and the environment. Cmd
+// computes it (filesystem reads live there) and refreshes it on demand
+// through Options.OnSummary. The completed tab reads the history/output
+// subset; the summary tab reads all of it.
+type Summary struct {
+	Count    int    // completed downloads (history lines)
+	Bytes    int64  // total bytes across the history
+	Dir      string // output directory, empty when unknown
+	Files    int    // files currently in the output directory
+	DirBytes int64  // total bytes in the output directory
+
+	Pending  int    // URLs waiting in the queue file
+	Settings string // one-line config recap (chunks, retries, workers)
+	Platform string // GOOS/GOARCH
+}
+
 // Options carries the static snapshots the board shows on its non-live tabs,
 // the run shape, and the hooks back into the engine and the queue file.
 type Options struct {
@@ -169,6 +187,13 @@ type Options struct {
 	// Completed-page hooks.
 	OnDeleteCompleted func(ref string) error
 	OnClearCompleted  func() error
+
+	// Summary is the board's dashboard roll-up; OnSummary returns a command
+	// that delivers a fresh SummaryMsg (see cmd for how it is computed).
+	// The board refreshes it when the completed or summary tab is opened,
+	// when a run finishes, and on demand (r on the summary tab).
+	Summary   Summary
+	OnSummary func() tea.Cmd
 }
 
 // defaultVisibleRows is the fallback window when the terminal size is not
@@ -232,8 +257,24 @@ func (m Model) windowSize() int {
 		return defaultVisibleRows
 	}
 	n := m.height - 7 - 2*len(m.warnings)
+	if m.tab == TabCompleted {
+		n -= m.completedSummaryLines()
+	}
 	if n < 3 {
 		n = 3
+	}
+	return n
+}
+
+// completedSummaryLines counts the body lines the completed tab spends on
+// its roll-up (header and output footer) rather than on list rows.
+func (m Model) completedSummaryLines() int {
+	n := 0
+	if m.opts.Summary.Count > 0 {
+		n++
+	}
+	if m.opts.Summary.Dir != "" {
+		n++
 	}
 	return n
 }
@@ -323,6 +364,10 @@ type QueueReloadMsg struct{ Jobs []JobRef }
 // edited externally or reset to defaults).
 type SettingsMsg struct{ Settings []Setting }
 
+// SummaryMsg refreshes the board's dashboard totals (completed history,
+// output dir, queue depth).
+type SummaryMsg struct{ Summary Summary }
+
 // ---------------------------------------------------------------------------
 // Model plumbing
 // ---------------------------------------------------------------------------
@@ -385,7 +430,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case RunFinishedMsg:
 		m.runFinished = true
-		return m, nil
+		// A finished run changes the totals the completed tab shows.
+		return m, m.refreshSummary()
 
 	case QueueReloadMsg:
 		m.applyReload(msg.Jobs)
@@ -396,6 +442,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selSettings >= len(m.opts.Settings) {
 			m.selSettings = maxInt(0, len(m.opts.Settings)-1)
 		}
+		return m, nil
+
+	case SummaryMsg:
+		m.opts.Summary = msg.Summary
 		return m, nil
 
 	case tea.KeyMsg:
@@ -419,7 +469,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n", "esc":
 			m.confirm = nil
 		}
-		return m, nil
+		// A confirmed delete/clear changes the completed totals.
+		return m, m.refreshSummary()
 	}
 
 	// The help overlay swallows everything except closing and quitting.
@@ -447,13 +498,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "tab", "right", "l":
 		m.tab = (m.tab + 1) % Tab(len(tabNames))
-		return m, nil
+		return m, m.refreshSummary()
 	case "shift+tab", "left", "h":
 		m.tab = (m.tab + Tab(len(tabNames)) - 1) % Tab(len(tabNames))
-		return m, nil
-	case "1", "2", "3":
+		return m, m.refreshSummary()
+	case "1", "2", "3", "4":
 		m.tab = Tab(msg.String()[0] - '1')
-		return m, nil
+		return m, m.refreshSummary()
 	}
 
 	// Page-scoped keys: a control that belongs to the downloads page must
@@ -465,6 +516,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleCompletedKey(msg)
 	case TabSettings:
 		return m, m.handleSettingsKey(msg)
+	case TabSummary:
+		return m, m.handleSummaryKey(msg)
 	}
 	return m, nil
 }
@@ -687,6 +740,24 @@ func (m *Model) warn(text string) {
 	if len(m.warnings) > 3 {
 		m.warnings = m.warnings[len(m.warnings)-3:]
 	}
+}
+
+// refreshSummary asks cmd for fresh dashboard totals, but only while a tab
+// that shows them (completed or summary) is open.
+func (m Model) refreshSummary() tea.Cmd {
+	if (m.tab == TabCompleted || m.tab == TabSummary) && m.opts.OnSummary != nil {
+		return m.opts.OnSummary()
+	}
+	return nil
+}
+
+// handleSummaryKey is the summary panel's key map: it is read-only, so the
+// only action is a manual refresh.
+func (m *Model) handleSummaryKey(msg tea.KeyMsg) tea.Cmd {
+	if msg.String() == "r" {
+		return m.refreshSummary()
+	}
+	return nil
 }
 
 func (m *Model) clampSettingsSelection() {
@@ -949,6 +1020,8 @@ func (m Model) View() string {
 		b.WriteString(m.viewCompleted())
 	case TabSettings:
 		b.WriteString(m.viewSettings())
+	case TabSummary:
+		b.WriteString(m.viewSummary())
 	}
 
 	for _, w := range m.warnings {
@@ -975,34 +1048,37 @@ func (m Model) View() string {
 	}
 
 	saved, failed := m.counts()
-	switch {
-	case m.finished():
-		summary := fmt.Sprintf("run finished — %d saved, %d failed", saved, failed)
-		if failed > 0 {
-			b.WriteString(StyleErr.Render(summary))
-		} else {
-			b.WriteString(StyleOK.Render(summary))
+	// The summary panel is a snapshot, not a run view: it shows no status.
+	if m.tab != TabSummary {
+		switch {
+		case m.finished():
+			summary := fmt.Sprintf("run finished — %d saved, %d failed", saved, failed)
+			if failed > 0 {
+				b.WriteString(StyleErr.Render(summary))
+			} else {
+				b.WriteString(StyleOK.Render(summary))
+			}
+		case len(m.rows) == 0:
+			// The board opened an empty queue: invite the user to fill it.
+			b.WriteString(StyleDim.Render("queue is empty · press a to add a URL"))
+		case m.runningCount() == 0 && m.waitingCount() > 0:
+			b.WriteString(StyleDim.Render(fmt.Sprintf(
+				"idle — %d waiting · space start one · s start all (%d at a time)",
+				m.waitingCount(), m.opts.Jobs,
+			)))
+		default:
+			status := fmt.Sprintf(
+				"running %d/%d files · %d saved, %d failed",
+				m.runningCount(), len(m.rows), saved, failed,
+			)
+			if speed := m.currentSpeed(); speed > 0 {
+				status += fmt.Sprintf(" · %s/s %s", humanBytes(int64(speed)), sparkline(m.hist))
+			}
+			b.WriteString(StyleDim.Render(status))
 		}
-	case len(m.rows) == 0:
-		// The board opened an empty queue: invite the user to fill it.
-		b.WriteString(StyleDim.Render("queue is empty · press a to add a URL"))
-	case m.runningCount() == 0 && m.waitingCount() > 0:
-		b.WriteString(StyleDim.Render(fmt.Sprintf(
-			"idle — %d waiting · space start one · s start all (%d at a time)",
-			m.waitingCount(), m.opts.Jobs,
-		)))
-	default:
-		status := fmt.Sprintf(
-			"running %d/%d files · %d saved, %d failed",
-			m.runningCount(), len(m.rows), saved, failed,
-		)
-		if speed := m.currentSpeed(); speed > 0 {
-			status += fmt.Sprintf(" · %s/s %s", humanBytes(int64(speed)), sparkline(m.hist))
-		}
-		b.WriteString(StyleDim.Render(status))
 	}
 	b.WriteString("\n" + StyleDim.Render(m.pageHints()))
-	b.WriteString("\n" + StyleDim.Render("tab switch · 1-3 tabs · ? help · q quit"))
+	b.WriteString("\n" + StyleDim.Render("tab switch · 1-4 tabs · ? help · q quit"))
 	return b.String()
 }
 
@@ -1013,6 +1089,8 @@ func (m Model) pageHints() string {
 		return "j/k scroll · d delete entry · c clear history"
 	case TabSettings:
 		return "j/k select · enter edit · space toggle · r reset · R reset all · o editor"
+	case TabSummary:
+		return "r refresh"
 	default:
 		sKey := "s start all"
 		if m.activeCount() > 0 {
@@ -1142,18 +1220,35 @@ func (m Model) viewDownloads() string {
 	return b.String()
 }
 
-// viewCompleted renders the history with its own cursor and scroll window.
+// viewCompleted renders the history with its own cursor and scroll window,
+// framed by the roll-up: total downloads and bytes on top, the output
+// directory's current state below.
 func (m Model) viewCompleted() string {
-	if len(m.opts.Completed) == 0 {
-		return StyleDim.Render("no completed downloads yet") + "\n"
+	var b strings.Builder
+
+	s := m.opts.Summary
+	if s.Count > 0 {
+		b.WriteString(StyleTitle.Render(fmt.Sprintf("%d downloads", s.Count)))
+		if s.Bytes > 0 {
+			b.WriteString(StyleDim.Render(" · " + humanBytes(s.Bytes) + " saved"))
+		}
+		b.WriteString("\n")
 	}
+
+	if len(m.opts.Completed) == 0 {
+		b.WriteString(StyleDim.Render("no completed downloads yet") + "\n")
+		if s.Dir != "" {
+			b.WriteString(m.outputLine())
+		}
+		return b.String()
+	}
+
 	window := m.windowSize()
 	end := m.scrollCompleted + window
 	if end > len(m.opts.Completed) {
 		end = len(m.opts.Completed)
 	}
 
-	var b strings.Builder
 	if m.scrollCompleted > 0 {
 		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▲ %d more above", m.scrollCompleted)) + "\n")
 	}
@@ -1167,7 +1262,18 @@ func (m Model) viewCompleted() string {
 	if end < len(m.opts.Completed) {
 		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(m.opts.Completed)-end)) + "\n")
 	}
+
+	if s.Dir != "" {
+		b.WriteString(m.outputLine())
+	}
 	return b.String()
+}
+
+// outputLine describes where downloads land: directory, file count, size.
+func (m Model) outputLine() string {
+	s := m.opts.Summary
+	return StyleDim.Render(fmt.Sprintf("output  %s — %d files, %s",
+		s.Dir, s.Files, humanBytes(s.DirBytes))) + "\n"
 }
 
 // viewSettings renders the config rows with their own cursor and window.
@@ -1220,6 +1326,59 @@ func (m Model) viewSettings() string {
 
 	b.WriteString("\n" + StyleWarn.Render("note: restart dlm after a change so it takes full effect"))
 	b.WriteString("\n" + StyleWarn.Render("note: changing num_chunks restarts partial downloads from the beginning"))
+	return b.String()
+}
+
+// viewSummary is the dashboard panel: the same roll-up the plain snapshot
+// prints — queue, completed, downloads dir, settings, platform — assembled
+// from the refreshed Summary.
+func (m Model) viewSummary() string {
+	s := m.opts.Summary
+
+	queue := "empty"
+	if s.Pending > 0 {
+		queue = fmt.Sprintf("%d pending", s.Pending)
+	}
+
+	completed := "none yet"
+	if s.Count > 0 {
+		completed = fmt.Sprintf("%d downloads · %s saved", s.Count, humanBytes(s.Bytes))
+	}
+
+	downloads := "unknown"
+	if s.Dir != "" {
+		downloads = fmt.Sprintf("%s — %d files, %s", s.Dir, s.Files, humanBytes(s.DirBytes))
+	}
+
+	settings := s.Settings
+	if settings == "" {
+		settings = "—"
+	}
+	platform := s.Platform
+	if platform == "" {
+		platform = "—"
+	}
+
+	rows := []struct{ label, value string }{
+		{"queue", queue},
+		{"completed", completed},
+		{"downloads", downloads},
+		{"settings", settings},
+		{"platform", platform},
+	}
+
+	labelW := 0
+	for _, r := range rows {
+		if len(r.label) > labelW {
+			labelW = len(r.label)
+		}
+	}
+
+	var b strings.Builder
+	for _, r := range rows {
+		line := StyleDim.Render(fmt.Sprintf("%-*s", labelW, r.label)) + "  " + r.value
+		b.WriteString(truncateStyled(line, m.contentWidth()) + "\n")
+	}
 	return b.String()
 }
 
@@ -1358,8 +1517,11 @@ func (m Model) viewHelp() string {
 		"  o          edit the queue file in $EDITOR (settings tab: the config)",
 		"",
 		StyleDim.Render("board"),
-		"  1-3, tab   downloads / completed / settings",
+		"  1-4, tab   downloads / completed / settings / summary",
 		"  ?          this help · q quit (the run stops, parts resume later)",
+		"",
+		StyleDim.Render("summary tab"),
+		"  r          refresh the queue/completed/downloads totals",
 		"",
 		StyleDim.Render("row states"),
 		"  · waiting for you   held — nothing happens until you start it",

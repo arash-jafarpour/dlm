@@ -154,7 +154,7 @@ date, time, and file name.
 
 Keys are scoped per page, so a control never acts on another page's rows.
 
-- **Global**: `tab`/`←`/`→` switch tabs · `1`–`3` jump · `?` help · `q` quit
+- **Global**: `tab`/`←`/`→` switch tabs · `1`–`4` jump · `?` help · `q` quit
 - **Downloads**: `space` start/pause · `s` start all / stop all ·
   `r` retry · `x` cancel · `j`/`k` select and scroll · `a` add URLs ·
   `d` delete (asks for confirmation) · `J`/`K` move down/up ·
@@ -164,6 +164,7 @@ Keys are scoped per page, so a control never acts on another page's rows.
 - **Settings**: `j`/`k` select · `enter` edit (or `space` to toggle a
   boolean) · `r` reset that value to its default · `R` reset everything ·
   `o` edit `config.json` by hand — resets ask for confirmation first
+- **Summary**: `r` refresh the queue/completed/downloads totals
 
 Download values are validated exactly like `dlm config set`, and a change
 applies to the next file you start (no restart needed). Pausing cancels the

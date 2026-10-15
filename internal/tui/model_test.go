@@ -844,6 +844,106 @@ func TestBoardCompletedPageDeleteAndClear(t *testing.T) {
 	}
 }
 
+func TestBoardCompletedTabShowsSummary(t *testing.T) {
+	m := NewModel(Options{
+		Completed: []HistoryEntry{
+			{Text: "2026-10-15 10:00:00  a.mkv", Ref: "raw-a"},
+		},
+		Jobs: 1,
+		Summary: Summary{
+			Count: 65, Bytes: 24_500_000_000,
+			Dir: "/downloads", Files: 79, DirBytes: 24_500_000_000,
+		},
+	})
+
+	view := press(m, "2").View()
+	for _, want := range []string{"65 downloads", "saved", "/downloads", "79 files"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("completed roll-up missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestBoardCompletedTabRefreshesSummary(t *testing.T) {
+	calls := 0
+	m := NewModel(Options{
+		Completed: []HistoryEntry{{Text: "a", Ref: "a"}},
+		Jobs:      1,
+		OnSummary: func() tea.Cmd {
+			calls++
+			return func() tea.Msg {
+				return SummaryMsg{Summary: Summary{Count: 7, Dir: "/out"}}
+			}
+		},
+	})
+
+	// Opening the completed tab requests fresh numbers.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m = next.(Model)
+	if calls != 1 || cmd == nil {
+		t.Fatalf("opening completed must refresh the summary: calls=%d cmd=%v", calls, cmd)
+	}
+	m = update(m, cmd())
+	if !strings.Contains(m.View(), "7 downloads") {
+		t.Fatalf("summary message must update the roll-up:\n%s", m.View())
+	}
+
+	// A finished run refreshes it again while the tab is showing.
+	next, cmd = m.Update(RunFinishedMsg{})
+	m = next.(Model)
+	if calls != 2 || cmd == nil {
+		t.Fatalf("a finished run must refresh the summary: calls=%d cmd=%v", calls, cmd)
+	}
+}
+
+func TestBoardSummaryTabShowsDashboard(t *testing.T) {
+	calls := 0
+	m := NewModel(Options{
+		Jobs: 2,
+		Summary: Summary{
+			Count: 65, Bytes: 24_500_000_000,
+			Dir: "/downloads", Files: 79, DirBytes: 24_500_000_000,
+			Pending: 3, Settings: "chunks=8 retries=3 queue_jobs=1",
+			Platform: "linux/amd64",
+		},
+		OnSummary: func() tea.Cmd {
+			calls++
+			return func() tea.Msg { return SummaryMsg{Summary: Summary{Pending: 4}} }
+		},
+	})
+
+	// '4' opens the summary tab and asks for a refresh.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	m = next.(Model)
+	if m.tab != TabSummary {
+		t.Fatalf("tab = %v, want summary", m.tab)
+	}
+	if calls != 1 || cmd == nil {
+		t.Fatalf("opening summary must refresh: calls=%d cmd=%v", calls, cmd)
+	}
+
+	view := m.View()
+	for _, want := range []string{
+		"queue", "3 pending", "65 downloads", "79 files",
+		"chunks=8", "linux/amd64",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("summary tab missing %q:\n%s", want, view)
+		}
+	}
+
+	// The refresh command replaces the numbers.
+	m = update(m, cmd())
+	if !strings.Contains(m.View(), "4 pending") {
+		t.Fatalf("refresh must update the summary:\n%s", m.View())
+	}
+
+	// 'r' is the manual refresh.
+	if _, rcmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}); rcmd == nil {
+		t.Fatal("r must refresh the summary tab")
+	}
+}
+
 func TestBoardSettingsEditingAndValidation(t *testing.T) {
 	h := &boardHooks{}
 	m := press(newHookedModel(h), "3")
@@ -969,6 +1069,14 @@ func TestBoardTabSwitching(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), "num_chunks") {
 		t.Errorf("settings tab must list config keys:\n%s", m.View())
+	}
+
+	m = update(m, tea.KeyMsg{Type: tea.KeyTab})
+	if m.tab != TabSummary {
+		t.Fatalf("tab = %v, want summary", m.tab)
+	}
+	if !strings.Contains(m.View(), "platform") {
+		t.Errorf("summary tab must render its fields:\n%s", m.View())
 	}
 
 	m = update(m, tea.KeyMsg{Type: tea.KeyTab})
