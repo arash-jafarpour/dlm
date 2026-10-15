@@ -1048,6 +1048,18 @@ func TestBoardWarningsAreCappedAndShown(t *testing.T) {
 	}
 }
 
+func TestBoardFooterShowsVersion(t *testing.T) {
+	m := NewModel(Options{Jobs: 1, Version: "v0.5.0"})
+	if !strings.Contains(m.View(), "dlm v0.5.0") {
+		t.Fatalf("footer must show the version:\n%s", m.View())
+	}
+
+	// No version configured: nothing extra is rendered.
+	if strings.Contains(NewModel(Options{Jobs: 1}).View(), "dlm v") {
+		t.Fatalf("an empty version must not render:\n%s", NewModel(Options{Jobs: 1}).View())
+	}
+}
+
 func TestBoardTabSwitching(t *testing.T) {
 	m := newTestModel()
 

@@ -210,6 +210,7 @@ func runBoard(ctx *Context, urls []string, inline bool) error {
 		Completed: completedDisplayEntries(ctx.Config.CompletedFile),
 		Settings:  settingsRows(ctx.Config),
 		Jobs:      maxJobs(ctx.Config.QueueJobs),
+		Version:   version,
 		Summary:   boardSummary(ctx),
 		OnSummary: func() tea.Cmd {
 			// Recomputed on the cmd side: the roll-up reads the history

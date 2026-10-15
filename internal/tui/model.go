@@ -194,6 +194,9 @@ type Options struct {
 	// when a run finishes, and on demand (r on the summary tab).
 	Summary   Summary
 	OnSummary func() tea.Cmd
+
+	// Version is the running dlm version, shown dim on the footer.
+	Version string
 }
 
 // defaultVisibleRows is the fallback window when the terminal size is not
@@ -1078,7 +1081,11 @@ func (m Model) View() string {
 		}
 	}
 	b.WriteString("\n" + StyleDim.Render(m.pageHints()))
-	b.WriteString("\n" + StyleDim.Render("tab switch · 1-4 tabs · ? help · q quit"))
+	footer := StyleDim.Render("tab switch · 1-4 tabs · ? help · q quit")
+	if m.opts.Version != "" {
+		footer = padBetween(footer, StyleDim.Render("dlm "+m.opts.Version), m.width)
+	}
+	b.WriteString("\n" + footer)
 	return b.String()
 }
 
