@@ -18,6 +18,7 @@ var (
 	StyleBarEmpty    = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	StyleTabActive   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
 	StyleTabInactive = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	StyleStarting    = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 )
 
 // renderRow draws one live progress line, shaped like the plain-CLI rows so

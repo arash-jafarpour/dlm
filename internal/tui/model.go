@@ -35,9 +35,13 @@ const (
 	RowFailed
 	RowPaused
 	RowCancelled
-	// RowQueued is a file waiting for a worker slot. Every queued file is
-	// shown from the start; queue_jobs decides how many turn RowRunning.
+	// RowQueued is a held file: visible, but waiting for the user to start
+	// it (space) or switch to flowing mode (s).
 	RowQueued
+	// RowStarting is a file the app is working on: dispatched to a worker
+	// (or queued behind one) while the transfer is being set up, before
+	// any bytes arrive.
+	RowStarting
 )
 
 // Row is one file's slot in the downloads panel. Byte counts are updated
@@ -82,6 +86,15 @@ const (
 	ControlResume
 	ControlRetry
 	ControlCancel
+	// ControlStart starts one held job; ControlStartAll switches the run
+	// into flowing mode (fill worker slots, start later jobs as earlier
+	// ones finish) — the same behavior as `dlm download queue`.
+	// ControlStopAll is its inverse: active transfers stop (partial .part
+	// files remain) and every started-but-unfinished job returns to the
+	// held state, so the board looks like it did at launch.
+	ControlStart
+	ControlStartAll
+	ControlStopAll
 )
 
 // Options carries the static snapshots the board shows on its non-live tabs,
@@ -113,6 +126,7 @@ type Model struct {
 	selected     int
 	scrollOffset int
 	runFinished  bool
+	spin         int // advances on every tick; drives the starting spinner
 
 	width  int
 	height int
@@ -218,6 +232,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		m.spin++            // animates the "starting" spinner on live rows
 		return m, tickCmd() // periodic repaint: byte counters are atomics
 
 	case FileStartedMsg:
@@ -285,11 +300,32 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveSelection(-1)
 	case " ":
 		m.controlSelected(func(row *Row) ControlAction {
-			if row.Status == RowPaused {
+			switch row.Status {
+			case RowPaused:
 				return ControlResume
+			case RowQueued, RowStarting:
+				// Held → start it; already starting → back to held.
+				if row.Status == RowQueued {
+					return ControlStart
+				}
+				return ControlPause
+			case RowFailed, RowCancelled:
+				return ControlRetry
+			default:
+				return ControlPause
 			}
-			return ControlPause
 		})
+	case "s":
+		if m.opts.OnControl != nil {
+			// Toggle: with anything active, s stops the whole run and
+			// returns started files to the held state; otherwise it
+			// starts everything.
+			if m.activeCount() > 0 {
+				m.opts.OnControl(-1, ControlStopAll)
+			} else {
+				m.opts.OnControl(-1, ControlStartAll)
+			}
+		}
 	case "r":
 		m.controlSelected(func(*Row) ControlAction { return ControlRetry })
 	case "x":
@@ -402,21 +438,56 @@ func (m Model) View() string {
 	b.WriteString("\n" + StyleDim.Render("─") + "\n")
 
 	saved, failed := m.counts()
-	if m.finished() {
+	switch {
+	case m.finished():
 		summary := fmt.Sprintf("run finished — %d saved, %d failed", saved, failed)
 		if failed > 0 {
 			b.WriteString(StyleErr.Render(summary))
 		} else {
 			b.WriteString(StyleOK.Render(summary))
 		}
-	} else {
+	case m.runningCount() == 0 && m.waitingCount() > 0:
+		b.WriteString(StyleDim.Render(fmt.Sprintf(
+			"idle — %d waiting · space start one · s start all (%d at a time)",
+			m.waitingCount(), m.opts.Jobs,
+		)))
+	default:
 		b.WriteString(StyleDim.Render(fmt.Sprintf(
 			"running %d/%d files · %d saved, %d failed",
 			m.runningCount(), len(m.opts.QueueURLs), saved, failed,
 		)))
 	}
-	b.WriteString("\n" + StyleDim.Render("space pause/resume · r retry · x cancel · tab switch · q quit"))
+	sKey := "s start all"
+	if m.activeCount() > 0 {
+		sKey = "s stop all"
+	}
+	b.WriteString("\n" + StyleDim.Render(fmt.Sprintf(
+		"space start/pause · %s · r retry · x cancel · tab switch · q quit", sKey,
+	)))
 	return b.String()
+}
+
+// activeCount counts rows the engine is currently working on (set-up or
+// transferring) plus paused ones: anything a stop-all would take back.
+func (m Model) activeCount() int {
+	n := 0
+	for _, r := range m.rows {
+		switch r.Status {
+		case RowStarting, RowRunning, RowPaused:
+			n++
+		}
+	}
+	return n
+}
+
+func (m Model) waitingCount() int {
+	n := 0
+	for _, r := range m.rows {
+		if r.Status == RowQueued {
+			n++
+		}
+	}
+	return n
 }
 
 // finished reports whether every known job reached a terminal state. Paused
@@ -430,7 +501,7 @@ func (m Model) finished() bool {
 	}
 	for _, r := range m.rows {
 		switch r.Status {
-		case RowRunning, RowQueued, RowPaused:
+		case RowRunning, RowQueued, RowStarting, RowPaused:
 			return false
 		}
 	}
@@ -486,7 +557,12 @@ func (m Model) viewDownloads() string {
 		case RowRunning:
 			b.WriteString(marker + renderRow(r, labelW, barW, m.width) + "\n")
 		case RowQueued:
-			b.WriteString(marker + StyleDim.Render("· waiting  "+r.Label) + "\n")
+			// Held: the user has not asked for this file yet.
+			b.WriteString(marker + StyleDim.Render("· waiting for you  "+r.Label) + "\n")
+		case RowStarting:
+			// The app is on it: dispatched or waiting for a free slot
+			// while the transfer is set up.
+			b.WriteString(marker + StyleStarting.Render(spinnerFrame(m.spin)+" starting  "+r.Label) + "\n")
 		case RowSaved:
 			b.WriteString(marker + r.Detail + "\n")
 		case RowFailed:
@@ -515,10 +591,12 @@ func (m Model) viewList(items []string, empty string) string {
 	var b strings.Builder
 	for i, item := range items {
 		if i >= window {
-			b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below  (full list: dlm completed)", len(items)-i)) + "\n")
+			b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below  (full list: dlm ui, or completed.txt)", len(items)-i)) + "\n")
 			break
 		}
-		b.WriteString("  " + truncateDisplay(ui.CleanFileName(item), m.contentWidth()-4) + "\n")
+		// Items are pre-formatted by the caller (e.g. completed lines are
+		// "timestamp  file name"); only width-clip here.
+		b.WriteString("  " + truncateDisplay(item, m.contentWidth()-4) + "\n")
 	}
 	return b.String()
 }
@@ -549,6 +627,12 @@ func truncateDisplay(s string, max int) string {
 		return s
 	}
 	return s[:max-1] + "…"
+}
+
+// spinnerFrame returns the animated "starting" glyph for a tick count.
+func spinnerFrame(tick int) string {
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	return frames[tick%len(frames)]
 }
 
 // padBetween puts left and right on one line filling width.

@@ -139,6 +139,19 @@ func (r *schedRig) has(state tui.RowStatus, id int) bool {
 	return false
 }
 
+// hasState reports whether the LAST reported state for id matches state —
+// stop-all reports "held" for a job whose earlier reports differ.
+func (r *schedRig) hasState(state tui.RowStatus, id int) bool {
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
+	for i := len(r.states) - 1; i >= 0; i-- {
+		if r.states[i].ID == id {
+			return r.states[i].State == state
+		}
+	}
+	return false
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -160,6 +173,112 @@ func closed(ch <-chan struct{}) bool {
 	}
 }
 
+func TestSchedulerStartsFullyStopped(t *testing.T) {
+	runner := newBlockRunner()
+	rig, _ := newSchedRig(t, []string{"https://x/a", "https://x/b"}, 2, runner)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	rig.done = rig.sched.Start(runCtx)
+
+	time.Sleep(150 * time.Millisecond)
+	if got := runner.count("https://x/a") + runner.count("https://x/b"); got != 0 {
+		t.Fatalf("nothing may download before the user starts it, got %d attempts", got)
+	}
+	if closed(rig.done) {
+		t.Fatal("a run with held jobs is not finished")
+	}
+}
+
+func TestSchedulerSingleStartDoesNotFlow(t *testing.T) {
+	first, second := "https://x/a", "https://x/b"
+	runner := newBlockRunner()
+	rig, _ := newSchedRig(t, []string{first, second}, 1, runner)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	rig.done = rig.sched.Start(runCtx)
+
+	rig.sched.Control(0, tui.ControlStart)
+	waitFor(t, "first job running", func() bool { return runner.count(first) == 1 })
+
+	rig.sched.Control(0, tui.ControlCancel)
+	waitFor(t, "cancel report", func() bool { return rig.has(tui.RowCancelled, 0) })
+
+	// Starting one file must not start the rest: the second file stays held.
+	time.Sleep(150 * time.Millisecond)
+	if got := runner.count(second); got != 0 {
+		t.Fatalf("second job started by itself (%d attempts)", got)
+	}
+	if closed(rig.done) {
+		t.Fatal("held jobs keep the run open")
+	}
+
+	rig.sched.Control(1, tui.ControlCancel)
+	waitFor(t, "run finished", func() bool { return closed(rig.done) })
+}
+
+func TestSchedulerStartAllFlowsThroughQueue(t *testing.T) {
+	urls := []string{"https://x/1", "https://x/2", "https://x/3"}
+	runner := newBlockRunner()
+	rig, _ := newSchedRig(t, urls, 1, runner) // one worker: strict order
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	rig.done = rig.sched.Start(runCtx)
+
+	rig.sched.Control(-1, tui.ControlStartAll)
+	waitFor(t, "job 1 running", func() bool { return runner.count(urls[0]) == 1 })
+	if runner.count(urls[1])+runner.count(urls[2]) != 0 {
+		t.Fatal("one worker must serialize the queue")
+	}
+
+	// Finishing (here: cancelling) the first job pulls the next one in.
+	rig.sched.Control(0, tui.ControlCancel)
+	waitFor(t, "job 2 running", func() bool { return runner.count(urls[1]) == 1 })
+	rig.sched.Control(1, tui.ControlCancel)
+	waitFor(t, "job 3 running", func() bool { return runner.count(urls[2]) == 1 })
+	rig.sched.Control(2, tui.ControlCancel)
+
+	waitFor(t, "run finished", func() bool { return closed(rig.done) })
+}
+
+func TestSchedulerStopAllReturnsToHeld(t *testing.T) {
+	urls := []string{"https://x/a", "https://x/b"}
+	runner := newBlockRunner()
+	rig, _ := newSchedRig(t, urls, 1, runner) // one worker: a runs, b queues
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	rig.done = rig.sched.Start(runCtx)
+
+	rig.sched.Control(-1, tui.ControlStartAll)
+	waitFor(t, "job a running", func() bool { return runner.count(urls[0]) == 1 })
+
+	rig.sched.Control(-1, tui.ControlStopAll)
+
+	// Both jobs report held again (a after its wind-down).
+	waitFor(t, "job a held again", func() bool { return rig.hasState(tui.RowQueued, 0) })
+	waitFor(t, "job b held again", func() bool { return rig.hasState(tui.RowQueued, 1) })
+
+	// Flowing mode must be off: nothing restarts on its own.
+	time.Sleep(150 * time.Millisecond)
+	if runner.count(urls[0]) != 1 || runner.count(urls[1]) != 0 {
+		t.Fatalf("stop-all must halt the flow: a=%d b=%d",
+			runner.count(urls[0]), runner.count(urls[1]))
+	}
+	if closed(rig.done) {
+		t.Fatal("held jobs keep the run open")
+	}
+
+	// A single start still works afterwards.
+	rig.sched.Control(0, tui.ControlStart)
+	waitFor(t, "job a restarted", func() bool { return runner.count(urls[0]) == 2 })
+	rig.sched.Control(0, tui.ControlCancel)
+	rig.sched.Control(1, tui.ControlCancel)
+	waitFor(t, "run finished", func() bool { return closed(rig.done) })
+}
+
 func TestSchedulerPauseResumeRerunsJob(t *testing.T) {
 	url := "https://example.com/FAB.mkv"
 	runner := newBlockRunner()
@@ -169,6 +288,7 @@ func TestSchedulerPauseResumeRerunsJob(t *testing.T) {
 	defer cancelRun()
 	rig.done = rig.sched.Start(runCtx)
 
+	rig.sched.Control(0, tui.ControlStart)
 	waitFor(t, "first attempt", func() bool { return runner.count(url) == 1 })
 	rig.sched.Control(0, tui.ControlPause)
 	waitFor(t, "paused report", func() bool { return rig.has(tui.RowPaused, 0) })
@@ -197,6 +317,7 @@ func TestSchedulerRetryAfterFailure(t *testing.T) {
 	defer cancelRun()
 	rig.done = rig.sched.Start(runCtx)
 
+	rig.sched.Control(0, tui.ControlStart)
 	waitFor(t, "failed report", func() bool { return rig.has(tui.RowFailed, 0) })
 
 	// The run may already consider itself finished with only failed jobs,
@@ -218,6 +339,7 @@ func TestSchedulerCancelQueuedJobSkipsIt(t *testing.T) {
 	defer cancelRun()
 	rig.done = rig.sched.Start(runCtx)
 
+	rig.sched.Control(-1, tui.ControlStartAll)
 	waitFor(t, "first job running", func() bool { return runner.count(first) == 1 })
 
 	// The second job is still queued: cancel it before it ever starts.
@@ -240,6 +362,7 @@ func TestSchedulerSuccessRecordsAndFinishes(t *testing.T) {
 	defer cancelRun()
 	rig.done = rig.sched.Start(runCtx)
 
+	rig.sched.Control(0, tui.ControlStart)
 	waitFor(t, "run finished", func() bool { return closed(rig.done) })
 
 	remaining, err := readLinksFile(ctx.Config.QueueFile)
@@ -267,6 +390,7 @@ func TestSchedulerAllCancelledFinishes(t *testing.T) {
 	defer cancelRun()
 	rig.done = rig.sched.Start(runCtx)
 
+	rig.sched.Control(0, tui.ControlStart)
 	waitFor(t, "job started", func() bool { return runner.count(url) == 1 })
 	rig.sched.Control(0, tui.ControlCancel)
 	waitFor(t, "run finished", func() bool { return closed(rig.done) })

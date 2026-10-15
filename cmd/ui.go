@@ -100,7 +100,7 @@ func runBoard(ctx *Context, urls []string, settings string, inline bool) error {
 
 	model := tui.NewModel(tui.Options{
 		QueueURLs: urls,
-		Completed: completedHistoryLines(ctx.Config.CompletedFile),
+		Completed: completedDisplayLines(ctx.Config.CompletedFile),
 		Settings:  settings,
 		Jobs:      maxJobs(ctx.Config.QueueJobs),
 		OnControl: func(jobID int, action tui.ControlAction) {
@@ -138,6 +138,18 @@ func completedHistoryLines(path string) []string {
 		return nil
 	}
 	return nonEmptyLines(string(data))
+}
+
+// completedDisplayLines formats the completed history for the board's
+// completed tab: newest first, date+time and the file name only (never the
+// raw URL).
+func completedDisplayLines(path string) []string {
+	raw := completedHistoryLines(path)
+	lines := make([]string, 0, len(raw))
+	for i := len(raw) - 1; i >= 0; i-- {
+		lines = append(lines, completedLineForDisplay(raw[i]))
+	}
+	return lines
 }
 
 // uiSnapshot renders the plain-text dashboard snapshot shown when the
@@ -246,13 +258,13 @@ func nonEmptyLines(data string) []string {
 }
 
 // completedLineForDisplay turns a "<timestamp> | <url>" history line into
-// "<timestamp> | <file name>"; unrecognized lines pass through.
+// "<timestamp>  <file name>"; unrecognized lines pass through.
 func completedLineForDisplay(line string) string {
 	ts, url, ok := strings.Cut(line, "|")
 	if !ok {
 		return truncateLine(line, 64)
 	}
-	return strings.TrimSpace(ts) + " | " + ui.FileName(strings.TrimSpace(url))
+	return strings.TrimSpace(ts) + "  " + ui.FileName(strings.TrimSpace(url))
 }
 
 // truncateLine shortens a line, keeping its tail (the URL part of

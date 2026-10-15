@@ -15,9 +15,17 @@ import (
 type jobState int
 
 const (
-	jobQueued jobState = iota
+	// jobWaiting is a held job: visible on the board, but not dispatchable
+	// until the user starts it (space on its row) or switches the run into
+	// flowing mode (s). This is the board's default state for every file.
+	jobWaiting jobState = iota
+	jobQueued
 	jobRunning
 	jobPaused
+	// jobStopping marks a running job that stop-all canceled; its result
+	// lands as "held" (jobWaiting) rather than "cancelled", so the board
+	// returns to its launch state.
+	jobStopping
 	jobFailed
 	jobDone
 	jobCancelled
@@ -102,7 +110,7 @@ func NewScheduler(
 			id:    i,
 			url:   u,
 			label: tuiLabel(u),
-			state: jobQueued,
+			state: jobWaiting,
 		})
 	}
 	return s
@@ -177,7 +185,8 @@ func (j *schedJob) ctxOr(fallback context.Context) context.Context {
 // control is the single owner of job state and scheduling.
 func (s *Scheduler) control(ctx context.Context) {
 	inflight := 0
-	queued := append([]*schedJob{}, s.jobs...)
+	queued := []*schedJob{} // nothing is dispatchable until started
+	autoStart := false      // flowing mode: s key / ControlStartAll
 
 	report := func(j *schedJob, state tui.RowStatus, detail string) {
 		if s.notify != nil {
@@ -185,7 +194,33 @@ func (s *Scheduler) control(ctx context.Context) {
 		}
 	}
 
+	// startEnqueue moves one held/stopped job into the dispatch queue. The
+	// board shows it as "starting": the app is on it from this moment.
+	startEnqueue := func(j *schedJob) {
+		if j.state != jobWaiting && j.state != jobPaused &&
+			j.state != jobFailed && j.state != jobCancelled {
+			return
+		}
+		j.state = jobQueued
+		queued = append(queued, j)
+		report(j, tui.RowStarting, "")
+	}
+
 	dispatch := func() {
+		if autoStart {
+			// Flowing mode: every held job becomes dispatchable, in queue
+			// order, so finishing jobs pull the next waiting file.
+			queued = nil
+			for _, j := range s.jobs {
+				if j.state == jobWaiting {
+					j.state = jobQueued
+					report(j, tui.RowStarting, "")
+				}
+				if j.state == jobQueued {
+					queued = append(queued, j)
+				}
+			}
+		}
 		for inflight < s.workers && len(queued) > 0 {
 			j := queued[0]
 			queued = queued[1:]
@@ -231,6 +266,10 @@ func (s *Scheduler) control(ctx context.Context) {
 			switch {
 			case j.state == jobPaused, j.state == jobCancelled:
 				// The stop was user-requested and already reported.
+			case j.state == jobStopping:
+				// stop-all wound this transfer down: back to held.
+				j.state = jobWaiting
+				report(j, tui.RowQueued, "")
 			case res.err == nil:
 				j.state = jobDone
 				if !res.completed {
@@ -246,36 +285,67 @@ func (s *Scheduler) control(ctx context.Context) {
 			dispatch()
 
 		case c := <-s.controls:
+			if c.action == tui.ControlStartAll {
+				autoStart = true
+				dispatch()
+				continue
+			}
+			if c.action == tui.ControlStopAll {
+				// Back to the launch state: flowing mode off, active
+				// transfers wound down, unfinished jobs held again.
+				autoStart = false
+				for _, job := range s.jobs {
+					switch job.state {
+					case jobRunning:
+						job.state = jobStopping
+						if job.cancel != nil {
+							job.cancel()
+						}
+						report(job, tui.RowQueued, "")
+					case jobQueued, jobPaused:
+						job.state = jobWaiting
+						report(job, tui.RowQueued, "")
+					}
+				}
+				dispatch()
+				continue
+			}
 			if c.id < 0 || c.id >= len(s.jobs) {
 				continue
 			}
 			j := s.jobs[c.id]
 			switch c.action {
 			case tui.ControlPause:
-				if j.state == jobRunning {
+				switch j.state {
+				case jobRunning:
 					j.state = jobPaused
 					j.cancel()
 					report(j, tui.RowPaused, "")
-				}
-			case tui.ControlResume, tui.ControlRetry:
-				if j.state == jobPaused || j.state == jobFailed || j.state == jobCancelled {
-					j.state = jobQueued
-					queued = append(queued, j)
+				case jobQueued:
+					// Still waiting for a slot: put it back to held.
+					j.state = jobWaiting
 					report(j, tui.RowQueued, "")
-					dispatch()
 				}
+			case tui.ControlStart, tui.ControlResume, tui.ControlRetry:
+				startEnqueue(j)
+				dispatch()
 			case tui.ControlCancel:
-				if j.state == jobRunning || j.state == jobPaused {
+				switch j.state {
+				case jobRunning, jobPaused:
 					j.state = jobCancelled
 					if j.cancel != nil {
 						j.cancel()
 					}
 					report(j, tui.RowCancelled, "")
-				} else if !j.state.terminal() {
+				case jobWaiting, jobQueued:
 					j.state = jobCancelled
 					report(j, tui.RowCancelled, "")
 				}
 			}
+			// Any state change can complete the run (e.g. cancelling the
+			// last held job), so re-evaluate scheduling and the finish
+			// condition after every control.
+			dispatch()
 		}
 	}
 }

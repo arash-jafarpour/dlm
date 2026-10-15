@@ -15,7 +15,7 @@ func newTestModel() Model {
 			"https://example.com/FAB%20-%2022.mkv",
 			"https://example.com/FAB%20-%2023.mkv",
 		},
-		Completed: []string{"2026-10-11 10:01:22 | https://example.com/FAB-21.mkv"},
+		Completed: []string{"2026-10-11 10:01:22  FAB - 21.mkv"},
 		Settings:  "settings body",
 		Jobs:      2,
 	})
@@ -100,7 +100,7 @@ func TestBoardSelectionAndControls(t *testing.T) {
 	m = update(m, FileStartedMsg{ID: 0, Row: rowA})
 	m = update(m, FileStartedMsg{ID: 1, Row: rowB})
 
-	// Selection starts at the first row; j moves down.
+	// space on a running row pauses it.
 	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = update(m, tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
 	if gotID != 1 || gotAction != ControlPause {
@@ -117,6 +117,18 @@ func TestBoardSelectionAndControls(t *testing.T) {
 		t.Fatalf("space on paused row: got id=%d action=%v, want resume on job 1", gotID, gotAction)
 	}
 
+	// A waiting row: space means start that one file.
+	waiting := NewModel(Options{
+		QueueURLs: []string{"https://x/w1.mkv", "https://x/w2.mkv"},
+		Jobs:      2,
+		OnControl: func(id int, action ControlAction) { gotID, gotAction = id, action },
+	})
+	waiting = update(waiting, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_ = update(waiting, tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	if gotID != 1 || gotAction != ControlStart {
+		t.Fatalf("space on waiting row: got id=%d action=%v, want start on job 1", gotID, gotAction)
+	}
+
 	// x cancels, r retries the selected row.
 	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
 	if gotAction != ControlCancel {
@@ -125,6 +137,50 @@ func TestBoardSelectionAndControls(t *testing.T) {
 	update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	if gotAction != ControlRetry {
 		t.Fatalf("r: got %v, want retry", gotAction)
+	}
+}
+
+func TestBoardIdleFooterAndStartAllKey(t *testing.T) {
+	var gotID int
+	var gotAction ControlAction
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv"},
+		Jobs:      2,
+		OnControl: func(id int, action ControlAction) { gotID, gotAction = id, action },
+	})
+
+	view := m.View()
+	if !strings.Contains(view, "idle") || !strings.Contains(view, "s start all") {
+		t.Fatalf("board must explain it is idle before anything starts:\n%s", view)
+	}
+
+	// s switches to the flowing, download-all mode.
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if gotAction != ControlStartAll || gotID != -1 {
+		t.Fatalf("s: got id=%d action=%v, want start-all", gotID, gotAction)
+	}
+
+	// Once a file runs, the footer reports progress again.
+	m = update(m, FileStartedMsg{ID: 0, Row: newRow(0, "a.mkv", 100, 0)})
+	view = m.View()
+	if !strings.Contains(view, "running 1/2 files") {
+		t.Fatalf("running footer missing:\n%s", view)
+	}
+
+	// With work active, s becomes the stop-all toggle.
+	if !strings.Contains(view, "s stop all") {
+		t.Fatalf("footer must offer stop-all while running:\n%s", view)
+	}
+	_ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if gotAction != ControlStopAll {
+		t.Fatalf("second s: got %v, want stop-all", gotAction)
+	}
+
+	// After the engine confirms everything is held again, s starts all.
+	m = update(m, JobStateMsg{ID: 0, State: RowQueued})
+	_ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if gotAction != ControlStartAll {
+		t.Fatalf("s after stop: got %v, want start-all", gotAction)
 	}
 }
 
@@ -260,6 +316,74 @@ func TestBoardRowsFitTerminalWidth(t *testing.T) {
 	}
 }
 
+// TestBoardHeldVersusStartingStates: the user must be able to tell "needs
+// my input" (held, waiting for space/s) from "the app is on it" (starting:
+// dispatched or queued behind a worker while the transfer is set up).
+func TestBoardHeldVersusStartingStates(t *testing.T) {
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv"},
+		Jobs:      1,
+	})
+
+	// Everything held: "waiting for you" and no spinner anywhere.
+	view := m.View()
+	if !strings.Contains(view, "waiting for you") {
+		t.Fatalf("held rows must say they wait for the user:\n%s", view)
+	}
+	if strings.Contains(view, "starting") {
+		t.Fatalf("nothing may look like it is starting before the user acts:\n%s", view)
+	}
+
+	// Start the first file: its row switches to the animated "starting"
+	// state, the second stays held.
+	m = update(m, JobStateMsg{ID: 0, State: RowStarting})
+	view = m.View()
+	if !strings.Contains(view, "starting") {
+		t.Fatalf("started row must show the starting state:\n%s", view)
+	}
+	if !strings.Contains(view, "waiting for you") {
+		t.Fatalf("the untouched file must still ask for the user:\n%s", view)
+	}
+
+	// The spinner animates across ticks.
+	first := m.View()
+	m = update(m, tickMsg{})
+	if m.View() == first {
+		// The bytes did not change either, so only the spinner can differ;
+		// identical frames would mean the spinner is static.
+		t.Fatalf("starting spinner must animate between ticks")
+	}
+
+	// Bytes flowing switches the row to the progress bar.
+	live := newRow(0, "a.mkv", 100, 0)
+	live.Add(50)
+	m = update(m, FileStartedMsg{ID: 0, Row: live})
+	view = m.View()
+	if !strings.Contains(view, "50.0%") {
+		t.Fatalf("live row must show progress:\n%s", view)
+	}
+	if strings.Contains(view, "starting  a.mkv") {
+		t.Fatalf("starting line must be replaced by the bar:\n%s", view)
+	}
+}
+
+// TestSpaceOnStartingRowPutsItBackToHeld: space on a queued-behind-slots
+// row returns it to the held state instead of doing nothing.
+func TestSpaceOnStartingRowPutsItBackToHeld(t *testing.T) {
+	var action ControlAction
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv"},
+		Jobs:      1,
+		OnControl: func(_ int, a ControlAction) { action = a },
+	})
+	m = update(m, JobStateMsg{ID: 0, State: RowStarting})
+	_ = update(m, tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+
+	if action != ControlPause {
+		t.Fatalf("space on a starting row must ask to stop it, got %v", action)
+	}
+}
+
 func TestBoardWarningsAreCappedAndShown(t *testing.T) {
 	m := newTestModel()
 	for i := 0; i < 5; i++ {
@@ -281,8 +405,12 @@ func TestBoardTabSwitching(t *testing.T) {
 	if m.tab != TabCompleted {
 		t.Fatalf("tab = %v, want completed", m.tab)
 	}
-	if !strings.Contains(m.View(), "FAB-21.mkv") {
-		t.Errorf("completed tab must list history:\n%s", m.View())
+	completedView := m.View()
+	if !strings.Contains(completedView, "2026-10-11 10:01:22  FAB - 21.mkv") {
+		t.Errorf("completed tab must show date/time and file name:\n%s", completedView)
+	}
+	if strings.Contains(completedView, "http") {
+		t.Errorf("completed tab must never show URLs:\n%s", completedView)
 	}
 
 	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})

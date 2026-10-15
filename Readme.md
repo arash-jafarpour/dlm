@@ -123,9 +123,25 @@ also auto-silences when stdout is not a terminal (pipes, redirects, cron).
 ### Interactive UI
 
 On a real terminal with a non-empty queue, `dlm ui` opens the interactive
-board: **one page listing every queued file** in queue order — `queue_jobs`
-decides how many of them download at once (the rest show `· waiting`), and
-active rows carry their own live progress bar.
+board: **one page listing every queued file** in queue order. Nothing
+starts on its own — the board opens fully stopped:
+
+- `space` on a row starts that single file (or pauses/resumes/retries it,
+  depending on its state)
+- `s` toggles the whole run: start all (flowing mode — `queue_jobs` files
+  download at once, each completion pulls the next waiting file, exactly
+  like `dlm download queue`) or, pressed again, stop all: active transfers
+  wind down (partial `.part` files remain) and every unfinished job goes
+  back to `· waiting for you`, the state the board opened in
+
+Rows make the difference between "needs you" and "the app is on it"
+visible:
+
+```
+  · waiting for you  FAB - 33.mkv      held — press space, or s for all
+  ⠋ starting  FAB - 30.mkv             dispatched / waiting for a slot
+  FAB - 31.mkv  ████████░░░░░░  41.2% 1.2 GB/2.9 GB  21.4 MB/s  ETA 1m12s
+```
 
 ```
 dlm ui                 # interactive board (alternate screen)
@@ -133,14 +149,15 @@ dlm ui --inline        # draw inline instead of the alternate screen
 dlm ui | cat           # not a terminal: prints the snapshot instead
 ```
 
-Only file names are shown, never the raw URLs.
+Only file names are shown, never the raw URLs; the completed tab lists
+date, time, and file name.
 
-Keys: `space` pause/resume the selected row · `r` retry · `x` cancel ·
-`j`/`k` or `↑`/`↓` select and scroll · `tab`/`←`/`→` switch tabs · `1`–`3`
-jump (downloads / completed / settings) · `q` quit. Pausing cancels the
-transfer in place: the partial `.part` file stays on disk, so resuming
-continues from the exact byte. Quitting cancels the whole run the same way
-(nothing is lost, everything resumes).
+Keys: `space` start/pause · `s` start all / stop all · `r` retry ·
+`x` cancel · `j`/`k` or `↑`/`↓` select and scroll · `tab`/`←`/`→` switch
+tabs · `1`–`3` jump (downloads / completed / settings) · `q` quit. Pausing
+cancels the transfer in place: the partial `.part` file stays on disk, so
+resuming continues from the exact byte. Quitting cancels the whole run the
+same way (nothing is lost, everything resumes).
 
 The downloads page shows a window sized to the terminal; `j`/`k` scroll it
 (`▲ N more above` / `▼ N more below` markers show what is out of view). The
