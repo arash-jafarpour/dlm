@@ -82,6 +82,17 @@ type Scheduler struct {
 	controls chan controlMsg
 	done     chan struct{}
 
+	// stopped closes when the controller goroutine exits (context
+	// canceled). It is the shutdown signal for Add/Remove/Reorder; unlike
+	// done it never closes just because the run finished, so the board can
+	// keep editing the queue (adding new URLs) after a run completes.
+	stopped chan struct{}
+
+	// everHadJobs records that at least one job was ever registered. An
+	// empty run (board opened with an empty queue) must not report itself
+	// finished before the user adds anything.
+	everHadJobs bool
+
 	// newRunner builds the runner for one job. Called per job so settings
 	// changes (chunks, output dir, retries) take effect on the next file
 	// started, without restarting the board.
@@ -114,6 +125,7 @@ func NewScheduler(
 		results:     make(chan jobResult, len(urls)+1),
 		controls:    make(chan controlMsg, 16),
 		done:        make(chan struct{}),
+		stopped:     make(chan struct{}),
 		newRunner:   newRunner,
 		newReporter: newReporter,
 		notify:      notify,
@@ -137,6 +149,7 @@ func (s *Scheduler) addJobLocked(url string, id int) *schedJob {
 	}
 	s.jobs = append(s.jobs, j)
 	s.byID[id] = j
+	s.everHadJobs = true
 	return j
 }
 
@@ -153,6 +166,9 @@ func (s *Scheduler) Start(ctx context.Context) <-chan struct{} {
 	}
 	go func() {
 		s.control(ctx)
+		// The run is over and the board is quitting: wake any pending
+		// Add/Remove/Reorder so they return instead of blocking.
+		close(s.stopped)
 		wg.Wait()
 	}()
 	go func() {
@@ -172,18 +188,20 @@ func (s *Scheduler) Control(id int, action tui.ControlAction) {
 }
 
 // Add registers a new held job and returns its id (false when the board is
-// shutting down). Used by the board's add/editor flows.
+// shutting down). Used by the board's add/editor flows. It stays usable
+// after a run has finished — the queue is editable as long as the board is
+// open.
 func (s *Scheduler) Add(url string) (int, bool) {
 	reply := make(chan int, 1)
 	select {
 	case s.controls <- controlMsg{action: tui.ControlAdd, url: url, reply: reply}:
-	default:
+	case <-s.stopped:
 		return -1, false
 	}
 	select {
 	case id := <-reply:
 		return id, id >= 0
-	case <-s.done:
+	case <-s.stopped:
 		return -1, false
 	}
 }
@@ -304,7 +322,9 @@ func (s *Scheduler) control(ctx context.Context) {
 					break
 				}
 			}
-			if allTerminal {
+			// A run that never had a job is not "finished": the board
+			// opened an empty queue and is waiting for the user.
+			if s.everHadJobs && allTerminal {
 				s.finishOnce.Do(func() { close(s.done) })
 			}
 		}

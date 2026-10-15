@@ -438,3 +438,54 @@ func TestSchedulerAllCancelledFinishes(t *testing.T) {
 	rig.sched.Control(0, tui.ControlCancel)
 	waitFor(t, "run finished", func() bool { return closed(rig.done) })
 }
+
+// An empty queue is a valid board: the run must stay open (no "finished"
+// flash) and URLs added from the UI must land as held jobs.
+func TestSchedulerEmptyRunStaysOpenForAdds(t *testing.T) {
+	runner := newBlockRunner()
+	rig, _ := newSchedRig(t, nil, 2, runner)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	rig.done = rig.sched.Start(runCtx)
+
+	time.Sleep(150 * time.Millisecond)
+	if closed(rig.done) {
+		t.Fatal("an empty run must not report itself finished")
+	}
+
+	id, ok := rig.sched.Add("https://example.com/late.bin")
+	if !ok {
+		t.Fatal("Add must succeed on an empty but running board")
+	}
+	if got := runner.count("https://example.com/late.bin"); got != 0 {
+		t.Fatalf("an added job must stay held, got %d attempts", got)
+	}
+
+	// Starting it from the board works; the run then closes on cancel.
+	rig.sched.Control(id, tui.ControlStart)
+	waitFor(t, "added job started", func() bool {
+		return runner.count("https://example.com/late.bin") == 1
+	})
+	rig.sched.Control(id, tui.ControlCancel)
+	waitFor(t, "run finished", func() bool { return closed(rig.done) })
+}
+
+// Once a run has finished, its done channel is closed for good; the board is
+// still open, so adding another URL must not be dropped by that signal.
+func TestSchedulerAddAfterRunFinished(t *testing.T) {
+	url := "https://example.com/first.bin"
+	rig, _ := newSchedRig(t, []string{url}, 1, okRunner{})
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	rig.done = rig.sched.Start(runCtx)
+
+	rig.sched.Control(0, tui.ControlStart)
+	waitFor(t, "run finished", func() bool { return closed(rig.done) })
+
+	id, ok := rig.sched.Add("https://example.com/second.bin")
+	if !ok || id < 0 {
+		t.Fatalf("Add after a finished run must succeed, got id=%d ok=%v", id, ok)
+	}
+}

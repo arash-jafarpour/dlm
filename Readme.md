@@ -122,9 +122,9 @@ also auto-silences when stdout is not a terminal (pipes, redirects, cron).
 
 ### Interactive UI
 
-Run `dlm` with no arguments: on a real terminal with a non-empty queue it
-opens the interactive board — **one page listing every queued file** in
-queue order. Nothing starts on its own; the board opens fully stopped:
+Run `dlm` with no arguments: on a real terminal it opens the interactive
+board — **one page listing every queued file** in queue order. Nothing
+starts on its own; the board opens fully stopped:
 
 - `space` on a row starts that single file (or pauses/resumes/retries it,
   depending on its state)
@@ -189,9 +189,10 @@ The downloads page shows a window sized to the terminal; `j`/`k` scroll it
 completed list and settings body use the same window and width, so every
 page adapts to the terminal size.
 
-When stdout is not a terminal, or the queue is empty, `dlm` prints a plain
-snapshot (queue, completed, downloads dir, settings) and exits. `dlm --help`
-still lists every command.
+When stdout is not a terminal, `dlm` prints a plain snapshot (queue,
+completed, downloads dir, settings) and exits. An empty queue is no longer
+one of those cases: the board still opens, showing a placeholder, and `a`
+adds URLs straight from the UI. `dlm --help` still lists every command.
 
 ## File Locations
 

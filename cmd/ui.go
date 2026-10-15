@@ -20,8 +20,9 @@ import (
 	"github.com/arash-jafarpour/dlm/ui"
 )
 
-// runUI picks the board for interactive terminals with work to do, and the
-// plain snapshot everywhere else (pipes, cron, empty queue) — the same
+// runUI opens the board on any interactive terminal — empty queue included,
+// where the board shows a placeholder and URLs can be added with 'a'. Only
+// pipelines and cron (no terminal) get the plain snapshot, the same
 // degradation philosophy as the progress bar.
 func runUI(ctx *Context, inline bool) error {
 	urls, err := readLinksFile(ctx.Config.QueueFile)
@@ -29,8 +30,9 @@ func runUI(ctx *Context, inline bool) error {
 		return err
 	}
 
-	// Not a terminal, or nothing queued: print the plain snapshot.
-	if !ui.IsTerminal(os.Stdout) || len(urls) == 0 {
+	// Not a terminal: print the plain snapshot instead of a board nobody
+	// could drive.
+	if !ui.IsTerminal(os.Stdout) {
 		snapshot, err := uiSnapshot(ctx)
 		if err != nil {
 			return err
@@ -374,7 +376,7 @@ func uiSnapshot(ctx *Context) (string, error) {
 		runtime.GOOS, runtime.GOARCH)
 
 	fmt.Fprintf(&b, "\n%s\n", ui.Gray(
-		"the interactive board opens when this runs on a terminal with a non-empty queue",
+		"the interactive board opens when this runs on a terminal",
 	))
 	return b.String(), nil
 }

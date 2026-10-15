@@ -447,6 +447,43 @@ func TestBoardAddFlow(t *testing.T) {
 	}
 }
 
+func TestBoardEmptyQueueShowsPlaceholder(t *testing.T) {
+	added := 0
+	m := NewModel(Options{
+		Jobs: 2,
+		OnAdd: func(urls []string) []int {
+			added++
+			return []int{0}
+		},
+	})
+
+	// An empty queue is a valid board state: placeholder, not a transfer.
+	view := m.View()
+	for _, want := range []string{"queue is empty", "press a to add a URL", "0 files"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("empty board must show %q:\n%s", want, view)
+		}
+	}
+
+	// 'a' + a URL fills the board from the UI; the counts follow live.
+	m = press(m, "a")
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("https://x/added.mkv")})
+	m = update(m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if added != 1 {
+		t.Fatalf("OnAdd calls = %d, want 1", added)
+	}
+	view = m.View()
+	if strings.Contains(view, "queue is empty") {
+		t.Errorf("placeholder must disappear once a URL is queued:\n%s", view)
+	}
+	for _, want := range []string{"1 files", "waiting for you", "added.mkv"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("added URL must render as a held row (%q missing):\n%s", want, view)
+		}
+	}
+}
+
 func TestBoardDeleteSelectedAsksFirst(t *testing.T) {
 	var deleted int
 	m := NewModel(Options{

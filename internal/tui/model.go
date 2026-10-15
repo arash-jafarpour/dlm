@@ -928,7 +928,7 @@ func (m Model) View() string {
 	if m.opts.Jobs == 1 {
 		workerWord = "worker"
 	}
-	right := StyleDim.Render(fmt.Sprintf("%d %s · %d files", m.opts.Jobs, workerWord, len(m.opts.QueueURLs)))
+	right := StyleDim.Render(fmt.Sprintf("%d %s · %d files", m.opts.Jobs, workerWord, len(m.rows)))
 	b.WriteString(padBetween(header, right, m.width) + "\n")
 
 	var tabs []string
@@ -983,6 +983,9 @@ func (m Model) View() string {
 		} else {
 			b.WriteString(StyleOK.Render(summary))
 		}
+	case len(m.rows) == 0:
+		// The board opened an empty queue: invite the user to fill it.
+		b.WriteString(StyleDim.Render("queue is empty · press a to add a URL"))
 	case m.runningCount() == 0 && m.waitingCount() > 0:
 		b.WriteString(StyleDim.Render(fmt.Sprintf(
 			"idle — %d waiting · space start one · s start all (%d at a time)",
@@ -991,7 +994,7 @@ func (m Model) View() string {
 	default:
 		status := fmt.Sprintf(
 			"running %d/%d files · %d saved, %d failed",
-			m.runningCount(), len(m.opts.QueueURLs), saved, failed,
+			m.runningCount(), len(m.rows), saved, failed,
 		)
 		if speed := m.currentSpeed(); speed > 0 {
 			status += fmt.Sprintf(" · %s/s %s", humanBytes(int64(speed)), sparkline(m.hist))
@@ -1087,7 +1090,8 @@ func (m Model) runningCount() int {
 
 func (m Model) viewDownloads() string {
 	if len(m.rows) == 0 && len(m.static) == 0 {
-		return StyleDim.Render("waiting for the first transfer…") + "\n"
+		return StyleDim.Render("queue is empty") + "\n" +
+			StyleDim.Render("press a to add a URL, or o to edit the queue file in $EDITOR") + "\n"
 	}
 
 	var b strings.Builder
