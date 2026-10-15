@@ -253,6 +253,98 @@ func mustReadFile(t *testing.T, path string) []byte {
 // Chunked downloads
 // ---------------------------------------------------------------------------
 
+// TestChunkedDownloadRestartsWhenChunkCountChanges is the num_chunks
+// boundary: parts written under a different layout must not be resumed
+// (their bytes sit on different chunk boundaries), so the download starts
+// over and still produces a correct file.
+func TestChunkedDownloadRestartsWhenChunkCountChanges(t *testing.T) {
+	data := bytes.Repeat([]byte("layout!"), 64*1024) // 448 KB
+	srv := rangeServer(data)
+	defer srv.Close()
+
+	d := testDownloader(t, &eventRecorder{}, 2, 1) // now: 2 chunks
+	output := filepath.Join(d.OutputDir, testFileName)
+
+	// Parts from a previous 4-chunk run, half-downloaded, with its marker.
+	for i := 0; i < 4; i++ {
+		partial := data[i*100 : i*100+50]
+		if err := os.WriteFile(output+fmt.Sprintf(".part%d", i), partial, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(partsMarkerPath(output),
+		[]byte(fmt.Sprintf("4 %d\n", len(data))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	completed, err := d.Download(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if !completed {
+		t.Fatal("expected completed=true")
+	}
+	if got := mustReadFile(t, output); !bytes.Equal(got, data) {
+		t.Fatalf("file corrupt after layout change: got %d bytes, want %d", len(got), len(data))
+	}
+
+	entries, _ := os.ReadDir(d.OutputDir)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".part") || strings.HasSuffix(e.Name(), ".dlmmeta") {
+			t.Errorf("leftover file after restart: %s", e.Name())
+		}
+	}
+}
+
+// TestChunkedDownloadResumesWhenLayoutMatches: the marker says "same
+// layout", so existing parts are kept and resumed.
+func TestChunkedDownloadResumesWhenLayoutMatches(t *testing.T) {
+	data := bytes.Repeat([]byte("same"), 128*1024) // 512 KB
+	srv := rangeServer(data)
+	defer srv.Close()
+
+	d := testDownloader(t, &eventRecorder{}, 4, 1)
+	output := filepath.Join(d.OutputDir, testFileName)
+
+	// Half of chunk 1, plus the marker for this exact layout.
+	start, _ := chunkBounds(int64(len(data)), 4, 1)
+	half := data[start : start+int64(len(data))/16]
+	if err := os.WriteFile(output+".part1", half, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(partsMarkerPath(output),
+		[]byte(fmt.Sprintf("4 %d\n", len(data))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := d.Download(context.Background(), srv.URL); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if got := mustReadFile(t, output); !bytes.Equal(got, data) {
+		t.Fatalf("resumed file corrupt: got %d bytes, want %d", len(got), len(data))
+	}
+	if _, err := os.Stat(partsMarkerPath(output)); !os.IsNotExist(err) {
+		t.Error("marker must be removed after a successful merge")
+	}
+}
+
+// TestChunkedDownloadMergesChunks cleans up its marker too.
+func TestChunkedDownloadMarkerLifecycle(t *testing.T) {
+	data := bytes.Repeat([]byte("m"), 256*1024)
+	srv := rangeServer(data)
+	defer srv.Close()
+
+	d := testDownloader(t, &eventRecorder{}, 2, 1)
+	output := filepath.Join(d.OutputDir, testFileName)
+
+	if _, err := d.Download(context.Background(), srv.URL); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if _, err := os.Stat(partsMarkerPath(output)); !os.IsNotExist(err) {
+		t.Error("marker must not survive a completed download")
+	}
+}
+
 func TestChunkedDownloadMergesChunks(t *testing.T) {
 	data := bytes.Repeat([]byte("0123456789abcdef"), 64*1024) // 1 MiB
 	srv := rangeServer(data)

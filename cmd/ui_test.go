@@ -265,6 +265,42 @@ func TestStoreCompletedLineCarriesStats(t *testing.T) {
 	}
 }
 
+// TestBareDlmRunsTheUI: `dlm` with no args and no terminal (the test
+// environment) prints the snapshot instead of help; `ui` is not a command
+// any more.
+func TestBareDlmRunsTheUI(t *testing.T) {
+	queueFile := filepath.Join(t.TempDir(), "queue.txt")
+	if err := os.WriteFile(queueFile, []byte("https://example.com/FAB-01.mkv\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.QueueFile = queueFile
+	cfg.CompletedFile = filepath.Join(t.TempDir(), "completed.txt")
+	cfg.OutputDir = t.TempDir()
+
+	ctx := &Context{Config: cfg}
+	if err := runUI(ctx, true); err != nil {
+		t.Fatalf("runUI: %v", err)
+	}
+}
+
+func TestUICmdIsGone(t *testing.T) {
+	state := &appState{ctx: &Context{Config: config.Default()}}
+	root := newRootCmd(state)
+
+	for _, c := range root.Commands() {
+		if c.Name() == "ui" {
+			t.Fatal("the ui subcommand must be removed: bare dlm is the board")
+		}
+	}
+	if root.RunE == nil {
+		t.Fatal("bare dlm must run the UI (root RunE)")
+	}
+	if root.Flags().Lookup("inline") == nil {
+		t.Fatal("--inline must be available on bare dlm")
+	}
+}
+
 func TestUISnapshotTilesAndCounts(t *testing.T) {
 	queueFile := filepath.Join(t.TempDir(), "queue.txt")
 	if err := os.WriteFile(queueFile, []byte(strings.Join([]string{

@@ -243,6 +243,52 @@ func verifyContentRange(cr string, start, end int64) error {
 	return nil
 }
 
+// partsMarkerPath is a small sidecar recording the chunk layout (count and
+// total size) that produced a download's .part files. Resuming across a
+// different layout would mix bytes from different chunk boundaries and
+// corrupt the merged file, so a marker mismatch restarts the parts.
+func partsMarkerPath(output string) string { return output + ".dlmmeta" }
+
+// invalidatePartsIfLayoutChanged removes stale .part files when the current
+// chunk layout differs from the one they were created with (e.g. the user
+// changed num_chunks between runs). Changing the layout deliberately
+// restarts the download from the beginning — the safe behavior.
+func (d *Downloader) invalidatePartsIfLayoutChanged(output string, totalSize int64) {
+	data, err := os.ReadFile(partsMarkerPath(output))
+	if err != nil {
+		return // no marker: fresh download, or parts from an older dlm
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 2 &&
+		fields[0] == fmt.Sprintf("%d", d.NumChunks) &&
+		fields[1] == fmt.Sprintf("%d", totalSize) {
+		return // same layout: parts are resumable
+	}
+
+	// Unknown previous layout: clean the maximum chunk range.
+	prev := d.NumChunks
+	if n, err := strconv.Atoi(fields[0]); err == nil && n > prev {
+		prev = n
+	}
+	if prev > 64 {
+		prev = 64
+	}
+	for i := 0; i < prev; i++ {
+		_ = os.Remove(fmt.Sprintf("%s.part%d", output, i))
+	}
+	_ = os.Remove(partsMarkerPath(output))
+}
+
+// recordPartsLayout writes the layout marker before chunks start; the marker
+// is removed again once the parts were merged successfully.
+func (d *Downloader) recordPartsLayout(output string, totalSize int64) {
+	_ = os.WriteFile(
+		partsMarkerPath(output),
+		[]byte(fmt.Sprintf("%d %d\n", d.NumChunks, totalSize)),
+		0o644,
+	)
+}
+
 // chunkedDownload splits the file into numChunks parallel range requests
 func (d *Downloader) chunkedDownload(
 	ctx context.Context,
@@ -256,6 +302,11 @@ func (d *Downloader) chunkedDownload(
 		d.Reporter.AlreadyComplete(fileName)
 		return false, nil
 	}
+
+	// A changed num_chunks (or file size) invalidates existing parts: the
+	// old chunk boundaries do not line up with the new ones.
+	d.invalidatePartsIfLayoutChanged(output, totalSize)
+	d.recordPartsLayout(output, totalSize)
 
 	bar := d.Reporter.Progress(totalSize, fileName, currentSize)
 	defer bar.Done()
@@ -302,6 +353,7 @@ func (d *Downloader) chunkedDownload(
 	if err := mergeFiles(output, tmpFiles); err != nil {
 		return false, apperrors.WrapChunkError(urlStr, -1, err)
 	}
+	_ = os.Remove(partsMarkerPath(output))
 
 	// Close the bar before reporting the saved path so the final frame and
 	// its newline land before the follow-up message.

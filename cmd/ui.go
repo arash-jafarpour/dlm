@@ -18,24 +18,7 @@ import (
 	"github.com/arash-jafarpour/dlm/internal/tui"
 	"github.com/arash-jafarpour/dlm/reader"
 	"github.com/arash-jafarpour/dlm/ui"
-	"github.com/spf13/cobra"
 )
-
-func newUICmd(ctx *Context) *cobra.Command {
-	var inline bool
-
-	cmd := &cobra.Command{
-		Use:   "ui",
-		Short: "Interactive download board (snapshot output when not a terminal)",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runUI(ctx, inline)
-		},
-	}
-	cmd.Flags().BoolVar(&inline, "inline", false, "run the board inline instead of the alternate screen")
-
-	return cmd
-}
 
 // runUI picks the board for interactive terminals with work to do, and the
 // plain snapshot everywhere else (pipes, cron, empty queue) — the same
@@ -391,7 +374,7 @@ func uiSnapshot(ctx *Context) (string, error) {
 		runtime.GOOS, runtime.GOARCH)
 
 	fmt.Fprintf(&b, "\n%s\n", ui.Gray(
-		"interactive board (live progress, pause/resume) ships in v0.6; `dlm --help` for everything available now",
+		"the interactive board opens when this runs on a terminal with a non-empty queue",
 	))
 	return b.String(), nil
 }

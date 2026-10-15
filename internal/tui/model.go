@@ -1,4 +1,4 @@
-// Package tui implements the interactive `dlm ui` board: a live view over a
+// Package tui implements the interactive `dlm` board: a live view over a
 // queue run with per-file progress rows and playback controls, built on
 // bubbletea. It only ever runs on a real terminal; the plain snapshot path
 // lives in cmd.
@@ -1213,6 +1213,9 @@ func (m Model) viewSettings() string {
 	if end < len(m.opts.Settings) {
 		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(m.opts.Settings)-end)) + "\n")
 	}
+
+	b.WriteString("\n" + StyleWarn.Render("note: restart dlm after a change so it takes full effect"))
+	b.WriteString("\n" + StyleWarn.Render("note: changing num_chunks restarts partial downloads from the beginning"))
 	return b.String()
 }
 
@@ -1335,7 +1338,7 @@ func (m Model) currentSpeed() float64 {
 // unicode diagrams: the terminal already renders it.
 func (m Model) viewHelp() string {
 	rows := []string{
-		StyleTitle.Render("dlm ui — keys"),
+		StyleTitle.Render("dlm — keys"),
 		"",
 		StyleDim.Render("downloads"),
 		"  space      start the selected file / pause it / back to held",

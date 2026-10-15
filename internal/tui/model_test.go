@@ -884,6 +884,19 @@ func TestBoardInputBackspaceIsRuneSafe(t *testing.T) {
 	}
 }
 
+func TestBoardSettingsWarnings(t *testing.T) {
+	m := press(newTestModel(), "3")
+	view := m.View()
+	for _, want := range []string{
+		"restart dlm after a change",
+		"changing num_chunks restarts partial downloads",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("settings page missing warning %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestBoardWarningsAreCappedAndShown(t *testing.T) {
 	m := newTestModel()
 	for i := 0; i < 5; i++ {

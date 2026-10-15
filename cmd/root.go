@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,10 +18,6 @@ type Context struct {
 	// (status lines, confirmations) are suppressed while errors stay.
 	Quiet bool
 }
-
-// errNoCommand is returned when dlm is invoked without a subcommand. It lets
-// Execute exit with a non-zero status without printing an extra error message.
-var errNoCommand = errors.New("no command specified")
 
 // appState holds process-wide state that is initialized lazily in the root
 // command's PersistentPreRunE, after flags have been parsed.
@@ -44,9 +39,6 @@ func Execute() error {
 	}
 
 	if err != nil {
-		if errors.Is(err, errNoCommand) {
-			return err
-		}
 		logError(err)
 		return err
 	}
@@ -55,15 +47,18 @@ func Execute() error {
 }
 
 func newRootCmd(state *appState) *cobra.Command {
+	var inline bool
+
 	root := &cobra.Command{
 		Use:           "dlm",
 		Short:         "Download Manager - A powerful download utility",
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// Bare `dlm` is the product: the interactive board on a terminal
+		// (plain snapshot when piped or the queue is empty).
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_ = cmd.Help()
-			return errNoCommand
+			return runUI(state.ctx, inline)
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Shell completion, help, and version must never contend for the
@@ -118,10 +113,12 @@ func newRootCmd(state *appState) *cobra.Command {
 		newDownloadCmd(state.ctx),
 		newCompletedCmd(state.ctx),
 		newConfigCmd(state.ctx),
-		newUICmd(state.ctx),
 		newVersionCmd(),
 		newUpdateCmd(),
 	)
+
+	root.Flags().BoolVar(&inline, "inline", false,
+		"draw the interactive board inline instead of taking over the screen")
 
 	// Output control flags work on every command, which is why they are
 	// persistent; they only affect download/listing output, never errors.
