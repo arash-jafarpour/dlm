@@ -538,6 +538,108 @@ func TestBoardEditorReload(t *testing.T) {
 	}
 }
 
+func TestBoardHelpOverlay(t *testing.T) {
+	m := newTestModel()
+	m = update(m, JobStateMsg{ID: 0, State: RowStarting})
+
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	view := m.View()
+	for _, want := range []string{"keys", "start all", "move the selected file", "waiting for you"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("help overlay missing %q:\n%s", want, view)
+		}
+	}
+
+	// Other keys are inert while help is open.
+	before := m.selected
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if m.selected != before {
+		t.Fatal("j must not act while the help overlay is open")
+	}
+
+	// esc closes it and the board returns.
+	m = update(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.help {
+		t.Fatal("esc must close help")
+	}
+	if !strings.Contains(m.View(), "downloads · completed · settings") {
+		t.Fatalf("board must return after help closes:\n%s", m.View())
+	}
+}
+
+func TestBoardSettingsEditorIsContextual(t *testing.T) {
+	openedQueue, openedConfig := false, false
+	m := NewModel(Options{
+		QueueURLs:    []string{"https://x/a.mkv"},
+		Jobs:         1,
+		OnOpenEditor: func() tea.Cmd { openedQueue = true; return nil },
+		OnOpenConfig: func() tea.Cmd { openedConfig = true; return nil },
+	})
+
+	// Downloads tab: o edits the queue file.
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	if !openedQueue || openedConfig {
+		t.Fatalf("o on downloads: queue=%v config=%v", openedQueue, openedConfig)
+	}
+
+	// Settings tab: o edits the config instead.
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	if !openedConfig {
+		t.Fatal("o on settings must open the config")
+	}
+
+	// The refreshed snapshot text replaces the settings body.
+	m = update(m, SettingsMsg{Text: "refreshed settings body"})
+	if !strings.Contains(m.View(), "refreshed settings body") {
+		t.Fatalf("settings body not refreshed:\n%s", m.View())
+	}
+}
+
+func TestBoardReporterStatsSink(t *testing.T) {
+	rep := NewBoardReporter(0, func(any) {})
+	rep.TransferDone(2048, 3*time.Second)
+
+	size, elapsed := rep.Stats()
+	if size != 2048 || elapsed != 3*time.Second {
+		t.Fatalf("Stats() = %d, %v", size, elapsed)
+	}
+}
+
+func TestBoardSpeedSparkline(t *testing.T) {
+	m := NewModel(Options{QueueURLs: []string{"https://x/a.mkv"}, Jobs: 1})
+	live := newRow(0, "a.mkv", 10_000_000, 0)
+	m = update(m, FileStartedMsg{ID: 0, Row: live})
+
+	// First tick only baselines the counter.
+	m = update(m, tickMsg{})
+	if m.currentSpeed() != 0 {
+		t.Fatalf("baseline tick must not report a speed, got %v", m.currentSpeed())
+	}
+
+	// Bytes moved between ticks produce a speed and a sparkline.
+	live.Add(300_000) // 300 KB in one tick ≈ 2 MB/s
+	m = update(m, tickMsg{})
+	if m.currentSpeed() <= 0 {
+		t.Fatalf("speed not sampled: %v", m.currentSpeed())
+	}
+	view := m.View()
+	if !strings.Contains(view, "/s") {
+		t.Fatalf("footer must show the aggregate speed:\n%s", view)
+	}
+	if !strings.ContainsAny(view, string(sparkRunes)) {
+		t.Fatalf("footer must show a sparkline:\n%s", view)
+	}
+
+	// A row finishing (dropping out of the sum) must not produce a
+	// negative speed.
+	live.Status = RowSaved
+	m = update(m, tickMsg{})
+	if m.currentSpeed() < 0 {
+		t.Fatalf("speed went negative: %v", m.currentSpeed())
+	}
+}
+
 func TestBoardWarningsAreCappedAndShown(t *testing.T) {
 	m := newTestModel()
 	for i := 0; i < 5; i++ {

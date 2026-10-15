@@ -66,7 +66,8 @@ func (r *QueueRun) Start(ctx context.Context) <-chan struct{} {
 
 					completed, err := runner.Download(ctx, url)
 					if err == nil && completed {
-						if storeErr := r.Store.completeAndRemove(url); storeErr != nil {
+						size, elapsed := transferStats(rep)
+						if storeErr := r.Store.completeAndRemove(url, size, elapsed); storeErr != nil {
 							err = storeErr
 						}
 					}

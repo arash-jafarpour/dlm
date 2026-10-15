@@ -46,6 +46,8 @@ type eventRecorder struct {
 	saved        []string
 	retries      []int
 	chunkRetries []string // "chunk=<index> attempt=<n>"
+	statsSize    int64
+	statsElapsed time.Duration
 	// events keeps the ordering between Done and Saved observable.
 	events []string
 }
@@ -61,6 +63,15 @@ func (e *eventRecorder) ChunkRetry(chunkIndex, attempt int, _ error) {
 	defer e.mu.Unlock()
 	e.chunkRetries = append(e.chunkRetries,
 		fmt.Sprintf("chunk=%d attempt=%d", chunkIndex, attempt))
+}
+
+// TransferDone implements downloader.StatsSink: the completed-files
+// tracking (size + duration) hangs off this.
+func (e *eventRecorder) TransferDone(size int64, elapsed time.Duration) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.statsSize = size
+	e.statsElapsed = elapsed
 }
 
 func (e *eventRecorder) AlreadyComplete(fileName string) {
@@ -102,6 +113,8 @@ type recorderSnapshot struct {
 	saved        []string
 	retries      []int
 	chunkRetries []string
+	statsSize    int64
+	statsElapsed time.Duration
 	events       []string
 }
 
@@ -111,6 +124,7 @@ func (e *eventRecorder) snapshot() recorderSnapshot {
 	s := recorderSnapshot{
 		added: e.added, done: e.done, complete: e.complete,
 		saved: e.saved, retries: e.retries, chunkRetries: e.chunkRetries,
+		statsSize: e.statsSize, statsElapsed: e.statsElapsed,
 	}
 	s.events = append(s.events, e.events...)
 	return s
@@ -296,6 +310,15 @@ func TestChunkedDownloadMergesChunks(t *testing.T) {
 	}
 	if doneIdx > savedIdx {
 		t.Errorf("bar Done() must run before Saved: events %v", ev.events)
+	}
+
+	// Completed-history tracking hangs off the StatsSink: size is exact and
+	// the duration is positive.
+	if ev.statsSize != int64(len(data)) {
+		t.Errorf("stats size = %d, want %d", ev.statsSize, len(data))
+	}
+	if ev.statsElapsed <= 0 {
+		t.Errorf("stats elapsed = %v, want > 0", ev.statsElapsed)
 	}
 }
 

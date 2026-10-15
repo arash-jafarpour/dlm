@@ -240,7 +240,7 @@ func TestQueueStoreConcurrentCompletionIntegrity(t *testing.T) {
 		wg.Add(1)
 		go func(url string) {
 			defer wg.Done()
-			if err := store.completeAndRemove(url); err != nil {
+			if err := store.completeAndRemove(url, 0, 0); err != nil {
 				t.Errorf("completeAndRemove(%s): %v", url, err)
 			}
 		}(u)

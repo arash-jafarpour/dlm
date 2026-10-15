@@ -154,12 +154,16 @@ date, time, and file name.
 
 Keys: `space` start/pause · `s` start all / stop all · `r` retry ·
 `x` cancel · `a` add URLs · `d` delete · `J`/`K` move down/up ·
-`o` edit queue in `$EDITOR` · `j`/`k` or `↑`/`↓` select and scroll ·
-`tab`/`←`/`→` switch tabs · `1`–`3` jump (downloads / completed /
-settings) · `q` quit. Pausing cancels the transfer in place: the partial
-`.part` file stays on disk, so resuming continues from the exact byte.
-Quitting cancels the whole run the same way (nothing is lost, everything
-resumes).
+`o` edit the queue file in `$EDITOR` (on the settings tab: the config) ·
+`j`/`k` or `↑`/`↓` select and scroll · `tab`/`←`/`→` switch tabs ·
+`1`–`3` jump (downloads / completed / settings) · `?` help · `q` quit.
+Pausing cancels the transfer in place: the partial `.part` file stays on
+disk, so resuming continues from the exact byte. Quitting cancels the whole
+run the same way (nothing is lost, everything resumes).
+
+The completed tab lists date, time, file name, size, and duration for every
+finished download. While transfers run, the footer shows the aggregate
+speed with a small sparkline.
 
 Queue edits apply immediately and are written straight to `queue.txt`
 (the add line accepts several whitespace-separated URLs at once; deleting

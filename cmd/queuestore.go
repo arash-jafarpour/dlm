@@ -70,28 +70,33 @@ func (s *queueStore) append(url string) error {
 
 // completeAndRemove records a successful download: append to the completed
 // history and remove the URL from the queue, in one atomic (under-store)
-// step so the pair cannot observe a torn state.
-func (s *queueStore) completeAndRemove(url string) error {
+// step so the pair cannot observe a torn state. size and elapsed are the
+// transfer's byte count and wall-clock duration (0 when unknown).
+func (s *queueStore) completeAndRemove(url string, size int64, elapsed time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.appendCompletedLocked(url); err != nil {
+	if err := s.appendCompletedLocked(url, size, elapsed); err != nil {
 		return err
 	}
-	if err := s.removeLocked(url); err != nil {
-		return err
-	}
-	return nil
+	return s.removeLocked(url)
 }
 
-func (s *queueStore) appendCompletedLocked(url string) error {
+// appendCompletedLocked writes one history line:
+//
+//	<timestamp> | <url> | <size bytes> | <duration>
+//
+// Older two-field lines ("<timestamp> | <url>") remain readable: the
+// display helpers treat the extra fields as optional.
+func (s *queueStore) appendCompletedLocked(url string, size int64, elapsed time.Duration) error {
 	f, err := os.OpenFile(s.completedFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	_, err = fmt.Fprintf(f, "%s | %s\n", timestamp, url)
+	_, err = fmt.Fprintf(f, "%s | %s | %d | %s\n",
+		timestamp, url, size, elapsed.Round(time.Millisecond))
 	return err
 }
 

@@ -219,7 +219,8 @@ func (s *Scheduler) worker(ctx context.Context) {
 
 			completed, err := runner.Download(j.ctxOr(ctx), j.url)
 			if err == nil && completed {
-				if storeErr := s.store.completeAndRemove(j.url); storeErr != nil {
+				size, elapsed := transferStats(rep)
+				if storeErr := s.store.completeAndRemove(j.url, size, elapsed); storeErr != nil {
 					err = storeErr
 				}
 			}

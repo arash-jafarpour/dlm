@@ -1,5 +1,7 @@
 package downloader
 
+import "time"
+
 // ProgressBar reports bytes consumed by an in-flight transfer. Add may be
 // called concurrently from multiple chunk goroutines; Done marks the transfer
 // as finished (e.g. clears the last carriage-return line).
@@ -30,6 +32,13 @@ type Reporter interface {
 	// Progress returns a progress adder for a transfer. offset is the number
 	// of already-downloaded bytes, so a resume shows cumulative progress.
 	Progress(total int64, label string, offset int64) ProgressBar
+}
+
+// StatsSink is an optional Reporter extension: when implemented, the
+// downloader reports the finished transfer's size and wall-clock duration
+// just before Saved. Callers record it (completed history shows both).
+type StatsSink interface {
+	TransferDone(size int64, elapsed time.Duration)
 }
 
 // noopReporter discards all notifications; it is installed by New when no

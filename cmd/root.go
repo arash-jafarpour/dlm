@@ -106,7 +106,7 @@ func newRootCmd(state *appState) *cobra.Command {
 			state.ctx.Quiet = quiet
 			state.ctx.Downloader = downloader.New(
 				cfg,
-				cliReporter{quiet: quiet, noProgress: noProgress},
+				&cliReporter{quiet: quiet, noProgress: noProgress},
 			)
 
 			return nil

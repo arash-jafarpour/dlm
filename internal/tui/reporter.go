@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/arash-jafarpour/dlm/downloader"
 )
@@ -18,6 +19,9 @@ type BoardReporter struct {
 	id   int
 	send func(msg any)
 	row  *Row
+
+	size    int64
+	elapsed time.Duration
 }
 
 // NewBoardReporter wires a per-job reporter to a message sink (typically
@@ -28,6 +32,15 @@ func NewBoardReporter(id int, send func(msg any)) *BoardReporter {
 
 // BoardReporter implements downloader.Reporter.
 var _ downloader.Reporter = (*BoardReporter)(nil)
+
+// TransferDone implements downloader.StatsSink; the scheduler reads the
+// values through Stats when recording the completed history.
+func (r *BoardReporter) TransferDone(size int64, elapsed time.Duration) {
+	r.size, r.elapsed = size, elapsed
+}
+
+// Stats returns the last transfer's size and duration (0 when unknown).
+func (r *BoardReporter) Stats() (int64, time.Duration) { return r.size, r.elapsed }
 
 func (r *BoardReporter) Progress(total int64, label string, offset int64) downloader.ProgressBar {
 	r.row = newRow(r.id, label, total, offset)

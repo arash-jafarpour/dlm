@@ -127,6 +127,9 @@ type Options struct {
 	// OnOpenEditor suspends the board and opens the queue file in $EDITOR;
 	// the returned command must deliver a QueueReloadMsg afterwards.
 	OnOpenEditor func() tea.Cmd
+	// OnOpenConfig opens the config file in $EDITOR; the returned command
+	// must deliver a SettingsMsg with the refreshed snapshot text.
+	OnOpenConfig func() tea.Cmd
 }
 
 // defaultVisibleRows is the fallback window when the terminal size is not
@@ -145,11 +148,17 @@ type Model struct {
 	selected     int
 	scrollOffset int
 	runFinished  bool
-	spin         int // advances on every tick; drives the starting spinner
+	spin         int  // advances on every tick; drives the starting spinner
+	help         bool // help overlay visible
 
 	// Queue-editing input line ('a'): active while the user types URLs.
 	inputActive bool
 	input       string
+
+	// Aggregate speed sampling for the footer sparkline.
+	haveSample bool
+	lastTotal  int64
+	hist       []float64
 
 	width  int
 	height int
@@ -250,6 +259,10 @@ type JobRef struct {
 // the resulting job set.
 type QueueReloadMsg struct{ Jobs []JobRef }
 
+// SettingsMsg refreshes the settings tab body (after the config file was
+// edited externally).
+type SettingsMsg struct{ Text string }
+
 // ---------------------------------------------------------------------------
 // Model plumbing
 // ---------------------------------------------------------------------------
@@ -267,7 +280,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		m.spin++            // animates the "starting" spinner on live rows
+		m.spin++ // animates the "starting" spinner on live rows
+		m.sampleSpeed()
 		return m, tickCmd() // periodic repaint: byte counters are atomics
 
 	case FileStartedMsg:
@@ -317,6 +331,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyReload(msg.Jobs)
 		return m, nil
 
+	case SettingsMsg:
+		m.opts.Settings = msg.Text
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -324,6 +342,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The help overlay swallows everything except closing and quitting.
+	if m.help {
+		switch msg.String() {
+		case "?", "esc":
+			m.help = false
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+
 	// The add-input line captures everything until enter/esc.
 	if m.inputActive {
 		return m.handleInputKey(msg)
@@ -332,6 +361,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc", "ctrl+c":
 		return m, tea.Quit
+	case "?":
+		m.help = true
 	case "tab", "right", "l":
 		m.tab = (m.tab + 1) % Tab(len(tabNames))
 	case "shift+tab", "left", "h":
@@ -352,6 +383,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "K":
 		m.moveSelected(-1)
 	case "o":
+		// Contextual: on the settings tab this edits the config file,
+		// everywhere else the queue file.
+		if m.tab == TabSettings && m.opts.OnOpenConfig != nil {
+			return m, m.opts.OnOpenConfig()
+		}
 		if m.opts.OnOpenEditor != nil {
 			return m, m.opts.OnOpenEditor()
 		}
@@ -542,6 +578,10 @@ func (m *Model) replaceRow(old, fresh *Row) {
 // ---------------------------------------------------------------------------
 
 func (m Model) View() string {
+	if m.help {
+		return m.viewHelp()
+	}
+
 	var b strings.Builder
 
 	header := StyleTitle.Render("dlm") + StyleDim.Render("  interactive ui")
@@ -598,10 +638,14 @@ func (m Model) View() string {
 			m.waitingCount(), m.opts.Jobs,
 		)))
 	default:
-		b.WriteString(StyleDim.Render(fmt.Sprintf(
+		status := fmt.Sprintf(
 			"running %d/%d files · %d saved, %d failed",
 			m.runningCount(), len(m.opts.QueueURLs), saved, failed,
-		)))
+		)
+		if speed := m.currentSpeed(); speed > 0 {
+			status += fmt.Sprintf(" · %s/s %s", humanBytes(int64(speed)), sparkline(m.hist))
+		}
+		b.WriteString(StyleDim.Render(status))
 	}
 	sKey := "s start all"
 	if m.activeCount() > 0 {
@@ -611,7 +655,7 @@ func (m Model) View() string {
 		"space start/pause · %s · r retry · x cancel · a add · d delete · J/K move · o edit",
 		sKey,
 	)))
-	b.WriteString("\n" + StyleDim.Render("tab switch · j/k select · 1-3 tabs · q quit"))
+	b.WriteString("\n" + StyleDim.Render("tab switch · j/k select · 1-3 tabs · ? help · q quit"))
 	return b.String()
 }
 
@@ -806,6 +850,109 @@ func (m *Model) applyReload(jobs []JobRef) {
 		m.selected = maxInt(0, len(m.rows)-1)
 	}
 	m.ensureSelectionVisible()
+}
+
+// sampleSpeed records the aggregate transfer speed of one tick into the
+// sparkline history.
+func (m *Model) sampleSpeed() {
+	total := int64(0)
+	for _, r := range m.rows {
+		switch r.Status {
+		case RowRunning, RowStarting:
+			total += r.Current()
+		}
+	}
+	if !m.haveSample {
+		m.haveSample = true
+		m.lastTotal = total
+		return
+	}
+	delta := total - m.lastTotal
+	m.lastTotal = total
+	if delta < 0 {
+		delta = 0 // a finished row dropped out of the sum
+	}
+	m.hist = append(m.hist, float64(delta)/tickInterval.Seconds())
+	if len(m.hist) > sparkWidth {
+		m.hist = m.hist[len(m.hist)-sparkWidth:]
+	}
+}
+
+// currentSpeed is the most recently sampled aggregate speed in bytes/s.
+func (m Model) currentSpeed() float64 {
+	if len(m.hist) == 0 {
+		return 0
+	}
+	return m.hist[len(m.hist)-1]
+}
+
+// viewHelp renders the full-screen key reference ('?'). Plain text, no
+// unicode diagrams: the terminal already renders it.
+func (m Model) viewHelp() string {
+	rows := []string{
+		StyleTitle.Render("dlm ui — keys"),
+		"",
+		StyleDim.Render("downloads"),
+		"  space      start the selected file / pause it / back to held",
+		"  s          start all (flowing: " + fmt.Sprint(m.opts.Jobs) + " at a time) · press again to stop all",
+		"  r          retry the selected file (failed, paused or cancelled)",
+		"  x          cancel the selected file",
+		"  j/k        select (up/down scrolls the queue list)",
+		"",
+		StyleDim.Render("queue editing"),
+		"  a          add URLs (paste several, whitespace separated; enter adds)",
+		"  d          delete the selected file from the queue",
+		"  J/K        move the selected file down/up (changes flow order)",
+		"  o          edit the queue file in $EDITOR (settings tab: the config)",
+		"",
+		StyleDim.Render("board"),
+		"  1-3, tab   downloads / completed / settings",
+		"  ?          this help · q quit (the run stops, parts resume later)",
+		"",
+		StyleDim.Render("row states"),
+		"  · waiting for you   held — nothing happens until you start it",
+		"  spinner             starting: dispatched or waiting for a slot",
+		"  bar                 transferring (per-file progress)",
+		"  paused              space resumes from the exact byte",
+	}
+	return strings.Join(rows, "\n") + "\n"
+}
+
+const (
+	// tickInterval matches the repaint cadence (tickCmd) and is the sample
+	// window for the footer's aggregate speed sparkline.
+	tickInterval = 150 * time.Millisecond
+	// sparkWidth caps the sparkline history.
+	sparkWidth = 20
+)
+
+// sparkRunes maps normalized speeds to sparkline block glyphs.
+var sparkRunes = []rune("▁▂▃▄▅▆▇█")
+
+// sparkline renders normalized values as block glyphs; empty when there is
+// nothing to show.
+func sparkline(vals []float64) string {
+	max := 0.0
+	for _, v := range vals {
+		if v > max {
+			max = v
+		}
+	}
+	if max <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, v := range vals {
+		idx := int(v / max * float64(len(sparkRunes)-1))
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(sparkRunes) {
+			idx = len(sparkRunes) - 1
+		}
+		b.WriteRune(sparkRunes[idx])
+	}
+	return b.String()
 }
 
 // padBetween puts left and right on one line filling width.

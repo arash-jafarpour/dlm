@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -225,16 +227,29 @@ func runBoard(ctx *Context, urls []string, settings string, inline bool) error {
 		OnDelete:  bq.delete,
 		OnReorder: bq.reorder,
 		OnOpenEditor: func() tea.Cmd {
-			editor := os.Getenv("EDITOR")
-			if editor == "" {
-				editor = "vi"
-			}
-			cmd := exec.Command(editor, ctx.Config.QueueFile)
+			cmd := editorCommand(ctx.Config.QueueFile)
 			return tea.ExecProcess(cmd, func(err error) tea.Msg {
 				if err != nil {
 					return tui.WarnMsg{Text: fmt.Sprintf("editor: %v", err)}
 				}
 				return tui.QueueReloadMsg{Jobs: bq.reload()}
+			})
+		},
+		OnOpenConfig: func() tea.Cmd {
+			cfgPath, err := configPath()
+			if err != nil {
+				return func() tea.Msg { return tui.WarnMsg{Text: err.Error()} }
+			}
+			cmd := editorCommand(cfgPath)
+			return tea.ExecProcess(cmd, func(err error) tea.Msg {
+				if err != nil {
+					return tui.WarnMsg{Text: fmt.Sprintf("editor: %v", err)}
+				}
+				text, err := uiSnapshot(ctx)
+				if err != nil {
+					return tui.WarnMsg{Text: err.Error()}
+				}
+				return tui.SettingsMsg{Text: text}
 			})
 		},
 	})
@@ -388,14 +403,37 @@ func nonEmptyLines(data string) []string {
 	return lines
 }
 
-// completedLineForDisplay turns a "<timestamp> | <url>" history line into
-// "<timestamp>  <file name>"; unrecognized lines pass through.
+// completedLineForDisplay turns a history line into
+// "<timestamp>  <file name>  <size>  <duration>". The size and duration
+// columns are shown when present; older two-field lines stay readable.
 func completedLineForDisplay(line string) string {
-	ts, url, ok := strings.Cut(line, "|")
-	if !ok {
+	parts := strings.Split(line, "|")
+	if len(parts) < 2 {
 		return truncateLine(line, 64)
 	}
-	return strings.TrimSpace(ts) + "  " + ui.FileName(strings.TrimSpace(url))
+	out := strings.TrimSpace(parts[0]) + "  " + ui.FileName(strings.TrimSpace(parts[1]))
+	if len(parts) >= 4 {
+		if size, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64); err == nil && size > 0 {
+			out += "  " + humanBytes(size)
+		}
+		if d, err := time.ParseDuration(strings.TrimSpace(parts[3])); err == nil && d > 0 {
+			out += "  " + humanDuration(d)
+		}
+	}
+	return out
+}
+
+// humanDuration renders a transfer duration compactly: "12.3s", "3m07s",
+// "1h04m".
+func humanDuration(d time.Duration) string {
+	switch {
+	case d >= time.Hour:
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	case d >= time.Minute:
+		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+	default:
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
 }
 
 // truncateLine shortens a line, keeping its tail (the URL part of
@@ -405,4 +443,18 @@ func truncateLine(line string, max int) string {
 		return line
 	}
 	return "…" + line[len(line)-max+1:]
+}
+
+// editorCommand builds the editor invocation for file: $EDITOR, then
+// $VISUAL, then a platform default (notepad on Windows, vi elsewhere).
+func editorCommand(file string) *exec.Cmd {
+	for _, env := range []string{"EDITOR", "VISUAL"} {
+		if editor := os.Getenv(env); editor != "" {
+			return exec.Command(editor, file)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return exec.Command("notepad", file)
+	}
+	return exec.Command("vi", file)
 }

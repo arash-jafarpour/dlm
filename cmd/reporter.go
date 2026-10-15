@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/arash-jafarpour/dlm/downloader"
 	"github.com/arash-jafarpour/dlm/ui"
@@ -18,12 +19,25 @@ import (
 type cliReporter struct {
 	quiet      bool
 	noProgress bool
+
+	// Last transfer stats, fed by the downloader's StatsSink and read by
+	// the queue engine when recording the completed history.
+	size    int64
+	elapsed time.Duration
 }
 
 // cliReporter implements downloader.Reporter.
-var _ downloader.Reporter = cliReporter{}
+var _ downloader.Reporter = &cliReporter{}
 
-func (r cliReporter) Retry(attempt int, err error) {
+// TransferDone implements downloader.StatsSink.
+func (r *cliReporter) TransferDone(size int64, elapsed time.Duration) {
+	r.size, r.elapsed = size, elapsed
+}
+
+// Stats returns the last transfer's size and duration (0 when unknown).
+func (r *cliReporter) Stats() (int64, time.Duration) { return r.size, r.elapsed }
+
+func (r *cliReporter) Retry(attempt int, err error) {
 	if r.quiet {
 		return
 	}
@@ -31,7 +45,7 @@ func (r cliReporter) Retry(attempt int, err error) {
 	fmt.Println("retrying...")
 }
 
-func (r cliReporter) ChunkRetry(chunkIndex, attempt int, err error) {
+func (r *cliReporter) ChunkRetry(chunkIndex, attempt int, err error) {
 	if r.quiet {
 		return
 	}
@@ -39,21 +53,21 @@ func (r cliReporter) ChunkRetry(chunkIndex, attempt int, err error) {
 	fmt.Println("retrying...")
 }
 
-func (r cliReporter) AlreadyComplete(fileName string) {
+func (r *cliReporter) AlreadyComplete(fileName string) {
 	if r.quiet {
 		return
 	}
 	fmt.Printf("%s %s\n", ui.Green("✓ file already complete:"), fileName)
 }
 
-func (r cliReporter) Saved(path string) {
+func (r *cliReporter) Saved(path string) {
 	if r.quiet {
 		return
 	}
 	fmt.Printf("%s %s\n", ui.Green("✓ saved →"), path)
 }
 
-func (r cliReporter) Progress(total int64, label string, offset int64) downloader.ProgressBar {
+func (r *cliReporter) Progress(total int64, label string, offset int64) downloader.ProgressBar {
 	// quiet implies no bar; noProgress suppresses only the bar but keeps
 	// the retry/complete/saved messages.
 	if r.quiet || r.noProgress {
@@ -75,6 +89,9 @@ type parallelReporter struct {
 	mgr   *ui.MultiBar
 	quiet bool
 
+	size    int64
+	elapsed time.Duration
+
 	// row is the file's live row once Progress reported its size; nil
 	// until then (e.g. failures before metadata) and in quiet mode.
 	row ui.RowHandle
@@ -82,6 +99,14 @@ type parallelReporter struct {
 
 // parallelReporter implements downloader.Reporter.
 var _ downloader.Reporter = (*parallelReporter)(nil)
+
+// TransferDone implements downloader.StatsSink.
+func (r *parallelReporter) TransferDone(size int64, elapsed time.Duration) {
+	r.size, r.elapsed = size, elapsed
+}
+
+// Stats returns the last transfer's size and duration (0 when unknown).
+func (r *parallelReporter) Stats() (int64, time.Duration) { return r.size, r.elapsed }
 
 func (r *parallelReporter) Progress(total int64, label string, offset int64) downloader.ProgressBar {
 	if r.quiet {
@@ -129,4 +154,13 @@ func (r *parallelReporter) finishError(err error) {
 	} else {
 		r.mgr.Line(line)
 	}
+}
+
+// transferStats extracts the last transfer's size and duration from a
+// reporter, when it carries them (all CLI and board reporters do).
+func transferStats(rep downloader.Reporter) (int64, time.Duration) {
+	if ts, ok := rep.(interface{ Stats() (int64, time.Duration) }); ok {
+		return ts.Stats()
+	}
+	return 0, 0
 }

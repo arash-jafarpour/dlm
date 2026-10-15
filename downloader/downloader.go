@@ -259,6 +259,7 @@ func (d *Downloader) chunkedDownload(
 
 	bar := d.Reporter.Progress(totalSize, fileName, currentSize)
 	defer bar.Done()
+	start := time.Now()
 
 	chunkSize := totalSize / int64(d.NumChunks)
 	type result struct {
@@ -305,8 +306,16 @@ func (d *Downloader) chunkedDownload(
 	// Close the bar before reporting the saved path so the final frame and
 	// its newline land before the follow-up message.
 	bar.Done()
+	d.reportTransferDone(totalSize, start)
 	d.Reporter.Saved(output)
 	return true, nil // actually completed
+}
+
+// reportTransferDone feeds the optional StatsSink (size + elapsed).
+func (d *Downloader) reportTransferDone(size int64, start time.Time) {
+	if sink, ok := d.Reporter.(StatsSink); ok {
+		sink.TransferDone(size, time.Since(start))
+	}
 }
 
 // chunkWithRetries runs downloadChunk for one chunk with its own retry
@@ -488,6 +497,7 @@ func (d *Downloader) streamDownload(
 
 	bar := d.Reporter.Progress(totalSize, fileName, existingSize)
 	defer bar.Done()
+	start := time.Now()
 
 	if err := copyToFile(resp.Body, f, bar, urlStr, output); err != nil {
 		return false, err
@@ -496,6 +506,7 @@ func (d *Downloader) streamDownload(
 	// Close the bar before reporting the saved path so the final frame and
 	// its newline land before the follow-up message.
 	bar.Done()
+	d.reportTransferDone(totalSize, start)
 	d.Reporter.Saved(output)
 	return true, nil
 }

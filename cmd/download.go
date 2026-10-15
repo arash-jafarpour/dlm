@@ -109,14 +109,23 @@ func downloadQueueSequential(
 			fmt.Printf("%s", ui.Cyan("→ downloading\n"))
 		}
 
-		completed, err := ctx.Downloader.Download(context.Background(), urlStr)
+		// A per-file reporter carries this transfer's size and duration
+		// into the completed history.
+		rep := &cliReporter{quiet: ctx.Quiet}
+		runner := DownloadRunner(ctx.Downloader)
+		if concrete, ok := runner.(*downloader.Downloader); ok {
+			runner = concrete.WithReporter(rep)
+		}
+
+		completed, err := runner.Download(context.Background(), urlStr)
 		if err != nil {
 			logError(err)
 			continue
 		}
 
 		if completed {
-			if err := store.completeAndRemove(urlStr); err != nil {
+			size, elapsed := transferStats(rep)
+			if err := store.completeAndRemove(urlStr, size, elapsed); err != nil {
 				fmt.Printf("%s %v\n", ui.Yellow("⚠ couldn't record completed download:"), err)
 			}
 		}

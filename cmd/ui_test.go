@@ -5,9 +5,81 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arash-jafarpour/dlm/config"
 )
+
+func TestCompletedLineDisplayWithStats(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{
+			"2026-10-15 12:03:44 | https://x/FAB%20-%2029.mkv | 316757335 | 1m12.345s",
+			"2026-10-15 12:03:44  FAB - 29.mkv  302.1 MB  1m12s",
+		},
+		// Legacy two-field lines still render (no size/duration columns).
+		{
+			"2026-10-11 10:01:22 | https://x/FAB-21.mkv",
+			"2026-10-11 10:01:22  FAB-21.mkv",
+		},
+		// Bad numeric columns are simply omitted.
+		{
+			"2026-10-15 12:00:00 | https://x/a.bin | notanumber | nope",
+			"2026-10-15 12:00:00  a.bin",
+		},
+	}
+	for _, tc := range cases {
+		if got := completedLineForDisplay(tc.in); got != tc.want {
+			t.Errorf("completedLineForDisplay(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestHumanDuration(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want string
+	}{
+		{12340 * time.Millisecond, "12.3s"},
+		{72 * time.Second, "1m12s"},
+		{64 * time.Minute, "1h04m"},
+	}
+	for _, tc := range cases {
+		if got := humanDuration(tc.in); got != tc.want {
+			t.Errorf("humanDuration(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestStoreCompletedLineCarriesStats(t *testing.T) {
+	cfg := config.Default()
+	cfg.QueueFile = filepath.Join(t.TempDir(), "queue.txt")
+	cfg.CompletedFile = filepath.Join(t.TempDir(), "completed.txt")
+	if err := os.WriteFile(cfg.QueueFile, []byte("https://x/a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &Context{Config: cfg}
+	store := newQueueStore(ctx)
+
+	if err := store.completeAndRemove("https://x/a", 1234, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(cfg.CompletedFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(string(data))
+	parts := strings.Split(line, "|")
+	if len(parts) != 4 {
+		t.Fatalf("completed line = %q, want 4 fields", line)
+	}
+	if strings.TrimSpace(parts[2]) != "1234" {
+		t.Errorf("size field = %q", parts[2])
+	}
+	if got, err := time.ParseDuration(strings.TrimSpace(parts[3])); err != nil || got != 2*time.Second {
+		t.Errorf("duration field = %q (%v)", parts[3], err)
+	}
+}
 
 func TestUISnapshotTilesAndCounts(t *testing.T) {
 	queueFile := filepath.Join(t.TempDir(), "queue.txt")
