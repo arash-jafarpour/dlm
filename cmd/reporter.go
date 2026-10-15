@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"sync"
 	"time"
+
+	"github.com/arash-jafarpour/dlm/config"
 
 	"github.com/arash-jafarpour/dlm/downloader"
 	"github.com/arash-jafarpour/dlm/ui"
@@ -163,4 +166,28 @@ func transferStats(rep downloader.Reporter) (int64, time.Duration) {
 		return ts.Stats()
 	}
 	return 0, 0
+}
+
+// runnerProvider builds one downloader per job from the live config: the
+// HTTP transport (connection pool) is created once and shared, while
+// per-transfer settings (chunks, output dir, retries) are re-read every
+// time, so a settings change applies to the next file started.
+type runnerProvider struct {
+	cfg  *config.Config
+	base *downloader.Downloader
+	mu   sync.Mutex
+}
+
+func newRunnerProvider(cfg *config.Config) *runnerProvider {
+	return &runnerProvider{cfg: cfg, base: downloader.New(cfg, nil)}
+}
+
+func (p *runnerProvider) New() DownloadRunner {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := *p.base
+	cp.OutputDir = p.cfg.OutputDir
+	cp.NumChunks = p.cfg.NumChunks
+	cp.MaxRetries = p.cfg.MaxRetries
+	return &cp
 }

@@ -16,7 +16,8 @@ func newBoardQueueRig(t *testing.T, urls []string) (*boardQueue, *Context) {
 	ctx, store := runContext(t, urls)
 	ctx.Downloader = &fakeRunner{}
 
-	sched := NewScheduler(ctx, store, urls, 2,
+	sched := NewScheduler(store, urls, 2,
+		func() DownloadRunner { return ctx.Downloader },
 		func(int) downloader.Reporter { return nopReporter{} },
 		nil,
 	)

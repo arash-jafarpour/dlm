@@ -13,6 +13,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/arash-jafarpour/dlm/config"
 	"github.com/arash-jafarpour/dlm/downloader"
 	"github.com/arash-jafarpour/dlm/internal/tui"
 	"github.com/arash-jafarpour/dlm/reader"
@@ -40,28 +41,22 @@ func newUICmd(ctx *Context) *cobra.Command {
 // plain snapshot everywhere else (pipes, cron, empty queue) — the same
 // degradation philosophy as the progress bar.
 func runUI(ctx *Context, inline bool) error {
-	snapshot, err := uiSnapshot(ctx)
-	if err != nil {
-		return err
-	}
-
 	urls, err := readLinksFile(ctx.Config.QueueFile)
 	if err != nil {
 		return err
 	}
 
+	// Not a terminal, or nothing queued: print the plain snapshot.
 	if !ui.IsTerminal(os.Stdout) || len(urls) == 0 {
-		if !ui.IsTerminal(os.Stdout) {
-			fmt.Print(snapshot)
-			return nil
+		snapshot, err := uiSnapshot(ctx)
+		if err != nil {
+			return err
 		}
-		// Interactive, but nothing queued: show the snapshot plus a hint
-		// rather than an idle board.
 		fmt.Print(snapshot)
 		return nil
 	}
 
-	return runBoard(ctx, urls, snapshot, inline)
+	return runBoard(ctx, urls, inline)
 }
 
 // boardQueue binds the board's queue-editing hooks to the queue file and
@@ -177,7 +172,7 @@ func (b *boardQueue) reload() []tui.JobRef {
 // runBoard starts the controllable queue run and hands the terminal to the
 // bubbletea board. Quitting cancels the run context: active transfers stop
 // at their next context check and partial .part files remain for resume.
-func runBoard(ctx *Context, urls []string, settings string, inline bool) error {
+func runBoard(ctx *Context, urls []string, inline bool) error {
 	opts := []tea.ProgramOption{}
 	if !inline {
 		opts = append(opts, tea.WithAltScreen())
@@ -202,26 +197,68 @@ func runBoard(ctx *Context, urls []string, settings string, inline bool) error {
 		}
 	}
 
+	store := newQueueStore(ctx)
+	provider := newRunnerProvider(ctx.Config)
 	sched = NewScheduler(
-		ctx,
-		newQueueStore(ctx),
+		store,
 		urls,
 		maxJobs(ctx.Config.QueueJobs),
+		provider.New,
 		func(id int) downloader.Reporter { return tui.NewBoardReporter(id, send) },
 		func(msg tui.JobStateMsg) { send(msg) },
 	)
 
-	bq := newBoardQueue(newQueueStore(ctx), sched, urls, func(text string) {
+	bq := newBoardQueue(store, sched, urls, func(text string) {
 		send(tui.WarnMsg{Text: text})
 	})
 
+	cfgPath, cfgPathErr := configPath()
+	saveCfg := func() error {
+		if cfgPathErr != nil {
+			return cfgPathErr
+		}
+		return ctx.Config.Save(cfgPath)
+	}
+
 	model := tui.NewModel(tui.Options{
 		QueueURLs: urls,
-		Completed: completedDisplayLines(ctx.Config.CompletedFile),
-		Settings:  settings,
+		Completed: completedDisplayEntries(ctx.Config.CompletedFile),
+		Settings:  settingsRows(ctx.Config),
 		Jobs:      maxJobs(ctx.Config.QueueJobs),
 		OnControl: func(jobID int, action tui.ControlAction) {
 			sched.Control(jobID, action)
+		},
+		OnSettingSet: func(key, value string) error {
+			if err := applySetting(ctx.Config, key, value); err != nil {
+				return err
+			}
+			return saveCfg()
+		},
+		OnSettingReset: func(key string) (string, error) {
+			d := settingByKey(key)
+			if d == nil {
+				return "", fmt.Errorf("unknown config key %q", key)
+			}
+			if err := d.Set(ctx.Config, d.Default(ctx.Config)); err != nil {
+				return "", err
+			}
+			if err := saveCfg(); err != nil {
+				return "", err
+			}
+			return d.Get(ctx.Config), nil
+		},
+		OnSettingsResetAll: func() ([]tui.Setting, error) {
+			*ctx.Config = *config.Default()
+			if err := saveCfg(); err != nil {
+				return nil, err
+			}
+			return settingsRows(ctx.Config), nil
+		},
+		OnDeleteCompleted: func(ref string) error {
+			return storeForCompleted(ctx).removeCompletedLine(ref)
+		},
+		OnClearCompleted: func() error {
+			return storeForCompleted(ctx).clearCompleted()
 		},
 		OnAdd:     bq.add,
 		OnDelete:  bq.delete,
@@ -245,11 +282,14 @@ func runBoard(ctx *Context, urls []string, settings string, inline bool) error {
 				if err != nil {
 					return tui.WarnMsg{Text: fmt.Sprintf("editor: %v", err)}
 				}
-				text, err := uiSnapshot(ctx)
-				if err != nil {
-					return tui.WarnMsg{Text: err.Error()}
+				// Re-read the file so external edits land in the board and
+				// in-memory config.
+				if reloaded, err := config.Load(cfgPath); err == nil {
+					*ctx.Config = *reloaded
+				} else {
+					return tui.WarnMsg{Text: fmt.Sprintf("config: %v", err)}
 				}
-				return tui.SettingsMsg{Text: text}
+				return tui.SettingsMsg{Settings: settingsRows(ctx.Config)}
 			})
 		},
 	})
@@ -286,16 +326,20 @@ func completedHistoryLines(path string) []string {
 	return nonEmptyLines(string(data))
 }
 
-// completedDisplayLines formats the completed history for the board's
-// completed tab: newest first, date+time and the file name only (never the
-// raw URL).
-func completedDisplayLines(path string) []string {
+// completedDisplayEntries formats the completed history for the board's
+// completed tab: newest first, date+time, file name, size and duration
+// (never the raw URL). Ref carries the raw line so the board can delete
+// exactly that entry.
+func completedDisplayEntries(path string) []tui.HistoryEntry {
 	raw := completedHistoryLines(path)
-	lines := make([]string, 0, len(raw))
+	entries := make([]tui.HistoryEntry, 0, len(raw))
 	for i := len(raw) - 1; i >= 0; i-- {
-		lines = append(lines, completedLineForDisplay(raw[i]))
+		entries = append(entries, tui.HistoryEntry{
+			Text: completedLineForDisplay(raw[i]),
+			Ref:  raw[i],
+		})
 	}
-	return lines
+	return entries
 }
 
 // uiSnapshot renders the plain-text dashboard snapshot shown when the
@@ -457,4 +501,11 @@ func editorCommand(file string) *exec.Cmd {
 		return exec.Command("notepad", file)
 	}
 	return exec.Command("vi", file)
+}
+
+// storeForCompleted returns a store for completed-file operations; the
+// store itself is cheap and mutex-guarded, and the board only calls one of
+// these per keypress.
+func storeForCompleted(ctx *Context) *queueStore {
+	return newQueueStore(ctx)
 }

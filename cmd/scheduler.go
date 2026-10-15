@@ -71,7 +71,6 @@ type controlMsg struct {
 // goroutines (the board's key handler). The plain CLI keeps the simpler
 // QueueRun, which has no playback semantics.
 type Scheduler struct {
-	ctx    *Context
 	store  *queueStore
 	jobs   []*schedJob
 	byID   map[int]*schedJob
@@ -83,6 +82,10 @@ type Scheduler struct {
 	controls chan controlMsg
 	done     chan struct{}
 
+	// newRunner builds the runner for one job. Called per job so settings
+	// changes (chunks, output dir, retries) take effect on the next file
+	// started, without restarting the board.
+	newRunner   func() DownloadRunner
 	newReporter func(id int) downloader.Reporter
 	notify      func(msg tui.JobStateMsg)
 
@@ -93,10 +96,10 @@ type Scheduler struct {
 // reporter (bound to the job id); notify receives engine-side state changes
 // for the board.
 func NewScheduler(
-	ctx *Context,
 	store *queueStore,
 	urls []string,
 	workers int,
+	newRunner func() DownloadRunner,
 	newReporter func(id int) downloader.Reporter,
 	notify func(msg tui.JobStateMsg),
 ) *Scheduler {
@@ -104,7 +107,6 @@ func NewScheduler(
 		workers = 1
 	}
 	s := &Scheduler{
-		ctx:         ctx,
 		store:       store,
 		workers:     workers,
 		byID:        map[int]*schedJob{},
@@ -112,6 +114,7 @@ func NewScheduler(
 		results:     make(chan jobResult, len(urls)+1),
 		controls:    make(chan controlMsg, 16),
 		done:        make(chan struct{}),
+		newRunner:   newRunner,
 		newReporter: newReporter,
 		notify:      notify,
 	}
@@ -212,7 +215,7 @@ func (s *Scheduler) worker(ctx context.Context) {
 			return
 		case j := <-s.work:
 			rep := s.newReporter(j.id)
-			runner := DownloadRunner(s.ctx.Downloader)
+			runner := s.newRunner()
 			if concrete, ok := runner.(*downloader.Downloader); ok {
 				runner = concrete.WithReporter(rep)
 			}

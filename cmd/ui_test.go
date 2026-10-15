@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,7 +9,190 @@ import (
 	"time"
 
 	"github.com/arash-jafarpour/dlm/config"
+	"github.com/arash-jafarpour/dlm/downloader"
+	"github.com/arash-jafarpour/dlm/internal/tui"
 )
+
+func TestSettingDefsRoundTrip(t *testing.T) {
+	cfg := config.Default()
+	before := *cfg
+
+	// Per-kind invalid input: text/path values reject empty strings,
+	// numerics reject non-numbers, booleans reject anything else.
+	invalidByKey := map[string]string{
+		"num_chunks":           "abc",
+		"queue_jobs":           "abc",
+		"insecure_skip_verify": "yes",
+		"output_dir":           "",
+		"queue_file":           "",
+		"completed_file":       "",
+	}
+
+	for _, d := range settingDefs {
+		if d.Default(cfg) == "" {
+			t.Errorf("%s: empty default", d.Key)
+		}
+		bad, ok := invalidByKey[d.Key]
+		if !ok {
+			t.Errorf("%s: no invalid sample in the table", d.Key)
+			continue
+		}
+		if err := d.Set(cfg, bad); err == nil {
+			t.Errorf("%s: invalid input %q must be refused", d.Key, bad)
+		}
+	}
+	if *cfg != before {
+		t.Errorf("invalid sets must not mutate the config: %+v", cfg)
+	}
+
+	// Valid input through the shared applySetting path.
+	if err := applySetting(cfg, "num_chunks", "16"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NumChunks != 16 {
+		t.Errorf("num_chunks = %d", cfg.NumChunks)
+	}
+	if err := applySetting(cfg, "queue_jobs", "99"); err == nil {
+		t.Error("queue_jobs above the cap must be refused")
+	}
+	if err := applySetting(cfg, "insecure_skip_verify", "yes"); err == nil {
+		t.Error("non-boolean value must be refused")
+	}
+	if err := applySetting(cfg, "nope", "x"); err == nil {
+		t.Error("unknown key must be refused")
+	}
+
+	// Rows render the live values.
+	rows := settingsRows(cfg)
+	if len(rows) != len(settingDefs) {
+		t.Fatalf("rows = %d, want %d", len(rows), len(settingDefs))
+	}
+	for _, r := range rows {
+		if r.Key == "num_chunks" && r.Value != "16" {
+			t.Errorf("row value = %q, want 16", r.Value)
+		}
+	}
+}
+
+func TestStoreRemoveCompletedLineAndClear(t *testing.T) {
+	cfg := config.Default()
+	cfg.QueueFile = filepath.Join(t.TempDir(), "queue.txt")
+	cfg.CompletedFile = filepath.Join(t.TempDir(), "completed.txt")
+	lines := []string{
+		"2026-10-15 10:00:00 | https://x/a | 100 | 1s",
+		"2026-10-15 11:00:00 | https://x/b | 200 | 2s",
+	}
+	if err := os.WriteFile(cfg.CompletedFile, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &Context{Config: cfg}
+	store := newQueueStore(ctx)
+
+	if err := store.removeCompletedLine(lines[0]); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(cfg.CompletedFile)
+	if strings.Contains(string(data), "https://x/a") || !strings.Contains(string(data), "https://x/b") {
+		t.Fatalf("remove dropped the wrong line: %s", data)
+	}
+
+	if err := store.clearCompleted(); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg.CompletedFile)
+	if len(data) != 0 {
+		t.Fatalf("clear left %q", data)
+	}
+
+	// Removing from a missing file is not an error.
+	if err := store.removeCompletedLine("whatever"); err != nil {
+		t.Fatalf("remove on empty history: %v", err)
+	}
+}
+
+func TestCompletedDisplayEntriesKeepRefs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "completed.txt")
+	raw := []string{
+		"2026-10-15 10:00:00 | https://x/a.mkv | 1048576 | 3s",
+		"2026-10-15 11:00:00 | https://x/b.mkv",
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(raw, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := completedDisplayEntries(path)
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	// Newest first, refs are the raw lines, display shows size/duration.
+	if !strings.Contains(entries[0].Text, "b.mkv") || entries[0].Ref != raw[1] {
+		t.Errorf("entry 0 = %+v", entries[0])
+	}
+	if !strings.Contains(entries[1].Text, "1.0 MB") || !strings.Contains(entries[1].Text, "3.0s") {
+		t.Errorf("entry 1 must show size and duration: %+v", entries[1])
+	}
+	if entries[1].Ref != raw[0] {
+		t.Errorf("entry 1 ref = %q", entries[1].Ref)
+	}
+}
+
+func TestRunnerProviderPicksUpConfigChanges(t *testing.T) {
+	cfg := config.Default()
+	p := newRunnerProvider(cfg)
+
+	first, ok := p.New().(*downloader.Downloader)
+	if !ok {
+		t.Fatal("provider must build *downloader.Downloader")
+	}
+	if first.NumChunks != cfg.NumChunks {
+		t.Fatalf("first runner chunks = %d", first.NumChunks)
+	}
+
+	// Settings change between jobs: the next runner picks it up, while the
+	// transport (connection pool) is shared.
+	cfg.NumChunks = 16
+	cfg.OutputDir = "/tmp/somewhere-else"
+
+	second, _ := p.New().(*downloader.Downloader)
+	if second.NumChunks != 16 || second.OutputDir != "/tmp/somewhere-else" {
+		t.Fatalf("second runner must see live config: chunks=%d dir=%s",
+			second.NumChunks, second.OutputDir)
+	}
+	if first.Client != second.Client {
+		t.Error("runners must share the HTTP transport")
+	}
+}
+
+func TestSchedulerBuildsOneRunnerPerJob(t *testing.T) {
+	cfg := config.Default()
+	cfg.QueueFile = filepath.Join(t.TempDir(), "queue.txt")
+	cfg.CompletedFile = filepath.Join(t.TempDir(), "completed.txt")
+	urls := []string{"https://x/1", "https://x/2"}
+	if err := os.WriteFile(cfg.QueueFile, []byte(strings.Join(urls, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &Context{Config: cfg}
+
+	builds := 0
+	sched := NewScheduler(newQueueStore(ctx), urls, 1,
+		func() DownloadRunner {
+			builds++
+			return okRunner{}
+		},
+		func(int) downloader.Reporter { return nopReporter{} },
+		nil,
+	)
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := sched.Start(runCtx)
+
+	sched.Control(-1, tui.ControlStartAll)
+	waitFor(t, "run finished", func() bool { return closed(done) })
+
+	if builds != len(urls) {
+		t.Errorf("runner builds = %d, want %d (one per job)", builds, len(urls))
+	}
+}
 
 func TestCompletedLineDisplayWithStats(t *testing.T) {
 	cases := []struct{ in, want string }{

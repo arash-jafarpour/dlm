@@ -117,7 +117,8 @@ func newSchedRig(t *testing.T, urls []string, workers int, runner DownloadRunner
 	ctx.Downloader = runner
 
 	rig := &schedRig{store: newQueueStore(ctx)}
-	rig.sched = NewScheduler(ctx, rig.store, urls, workers,
+	rig.sched = NewScheduler(rig.store, urls, workers,
+		func() DownloadRunner { return ctx.Downloader },
 		func(int) downloader.Reporter { return nopReporter{} },
 		func(msg tui.JobStateMsg) {
 			rig.notifyMu.Lock()

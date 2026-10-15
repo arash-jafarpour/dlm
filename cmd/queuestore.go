@@ -123,6 +123,42 @@ func (s *queueStore) rewriteLocked(urls []string) error {
 	return os.WriteFile(s.queueFile, []byte(strings.Join(urls, "\n")+"\n"), 0o644)
 }
 
+// clearCompleted empties the completed history (board "clear all").
+func (s *queueStore) clearCompleted() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return os.WriteFile(s.completedFile, []byte(""), 0o644)
+}
+
+// removeCompletedLine drops the first history line exactly equal to raw
+// (board "delete entry").
+func (s *queueStore) removeCompletedLine(raw string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := os.ReadFile(s.completedFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	dropped := false
+	var kept []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if !dropped && line == raw {
+			dropped = true
+			continue
+		}
+		if strings.TrimSpace(line) != "" {
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == 0 {
+		return os.WriteFile(s.completedFile, []byte(""), 0o644)
+	}
+	return os.WriteFile(s.completedFile, []byte(strings.Join(kept, "\n")+"\n"), 0o644)
+}
+
 // removeLocked rewrites the queue file without the URL, preserving the
 // order of the rest.
 func (s *queueStore) removeLocked(url string) error {

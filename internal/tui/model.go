@@ -103,12 +103,37 @@ const (
 	ControlReorder
 )
 
+// SettingKind picks the settings-page editing affordance for a value.
+type SettingKind int
+
+const (
+	SettingText SettingKind = iota
+	SettingInt
+	SettingBool
+)
+
+// Setting is one editable config-file value on the settings page.
+type Setting struct {
+	Key   string
+	Value string
+	Kind  SettingKind
+	Help  string
+}
+
+// HistoryEntry is one completed-download history line: Text is what the
+// board renders, Ref is the opaque raw line used to delete exactly that
+// entry.
+type HistoryEntry struct {
+	Text string
+	Ref  string
+}
+
 // Options carries the static snapshots the board shows on its non-live tabs,
 // the run shape, and the hooks back into the engine and the queue file.
 type Options struct {
 	QueueURLs []string
-	Completed []string
-	Settings  string
+	Completed []HistoryEntry
+	Settings  []Setting
 	Jobs      int
 
 	// OnControl is called when the user issues a playback control for a job.
@@ -128,8 +153,22 @@ type Options struct {
 	// the returned command must deliver a QueueReloadMsg afterwards.
 	OnOpenEditor func() tea.Cmd
 	// OnOpenConfig opens the config file in $EDITOR; the returned command
-	// must deliver a SettingsMsg with the refreshed snapshot text.
+	// must deliver a SettingsMsg with the refreshed rows.
 	OnOpenConfig func() tea.Cmd
+
+	// Settings-page hooks (nil disables the corresponding key row action).
+	// OnSettingSet validates and applies one key=value (persisting it).
+	OnSettingSet func(key, value string) error
+	// OnSettingReset restores one key to its default and returns the new
+	// display value.
+	OnSettingReset func(key string) (string, error)
+	// OnSettingsResetAll restores every default and returns the refreshed
+	// rows.
+	OnSettingsResetAll func() ([]Setting, error)
+
+	// Completed-page hooks.
+	OnDeleteCompleted func(ref string) error
+	OnClearCompleted  func() error
 }
 
 // defaultVisibleRows is the fallback window when the terminal size is not
@@ -151,9 +190,22 @@ type Model struct {
 	spin         int  // advances on every tick; drives the starting spinner
 	help         bool // help overlay visible
 
-	// Queue-editing input line ('a'): active while the user types URLs.
+	// Per-page cursors: each tab owns its selection so keys never act on
+	// another page's rows.
+	selCompleted    int
+	scrollCompleted int
+	selSettings     int
+	scrollSettings  int
+
+	// confirm is the modal for destructive actions; while it is set the
+	// board ignores every other key (including q).
+	confirm *confirmPrompt
+
+	// Queue-editing input line ('a' on downloads, enter on a setting):
+	// active while the user types.
 	inputActive bool
 	input       string
+	inputKey    string // setting key being edited; "" means "add URLs"
 
 	// Aggregate speed sampling for the footer sparkline.
 	haveSample bool
@@ -162,6 +214,14 @@ type Model struct {
 
 	width  int
 	height int
+}
+
+// confirmPrompt is a pending yes/no question. OnYes receives the current
+// model so the confirmed action mutates the same value Update returns
+// (closures over the model would edit a stale copy).
+type confirmPrompt struct {
+	Prompt string
+	OnYes  func(m *Model)
 }
 
 // windowSize is how many list rows fit on screen: terminal height minus the
@@ -259,9 +319,9 @@ type JobRef struct {
 // the resulting job set.
 type QueueReloadMsg struct{ Jobs []JobRef }
 
-// SettingsMsg refreshes the settings tab body (after the config file was
-// edited externally).
-type SettingsMsg struct{ Text string }
+// SettingsMsg refreshes the settings rows (after the config file was
+// edited externally or reset to defaults).
+type SettingsMsg struct{ Settings []Setting }
 
 // ---------------------------------------------------------------------------
 // Model plumbing
@@ -332,7 +392,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case SettingsMsg:
-		m.opts.Settings = msg.Text
+		m.opts.Settings = msg.Settings
+		if m.selSettings >= len(m.opts.Settings) {
+			m.selSettings = maxInt(0, len(m.opts.Settings)-1)
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -342,6 +405,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A pending confirmation swallows everything: y/enter accepts, n/esc
+	// cancels, and even q is ignored so answered questions cannot be
+	// escaped by habit.
+	if m.confirm != nil {
+		switch msg.String() {
+		case "y", "enter":
+			onYes := m.confirm.OnYes
+			m.confirm = nil
+			if onYes != nil {
+				onYes(&m)
+			}
+		case "n", "esc":
+			m.confirm = nil
+		}
+		return m, nil
+	}
+
 	// The help overlay swallows everything except closing and quitting.
 	if m.help {
 		switch msg.String() {
@@ -353,22 +433,45 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// The add-input line captures everything until enter/esc.
+	// An open input line captures everything until enter/esc.
 	if m.inputActive {
 		return m.handleInputKey(msg)
 	}
 
+	// Global keys work on every page.
 	switch msg.String() {
 	case "q", "esc", "ctrl+c":
 		return m, tea.Quit
 	case "?":
 		m.help = true
+		return m, nil
 	case "tab", "right", "l":
 		m.tab = (m.tab + 1) % Tab(len(tabNames))
+		return m, nil
 	case "shift+tab", "left", "h":
 		m.tab = (m.tab + Tab(len(tabNames)) - 1) % Tab(len(tabNames))
+		return m, nil
 	case "1", "2", "3":
 		m.tab = Tab(msg.String()[0] - '1')
+		return m, nil
+	}
+
+	// Page-scoped keys: a control that belongs to the downloads page must
+	// never act on settings or history rows.
+	switch m.tab {
+	case TabDownloads:
+		return m, m.handleDownloadsKey(msg)
+	case TabCompleted:
+		return m, m.handleCompletedKey(msg)
+	case TabSettings:
+		return m, m.handleSettingsKey(msg)
+	}
+	return m, nil
+}
+
+// handleDownloadsKey is the downloads page's own key map.
+func (m *Model) handleDownloadsKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
 	case "down", "j":
 		m.moveSelection(1)
 	case "up", "k":
@@ -376,20 +479,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.inputActive = true
 		m.input = ""
+		m.inputKey = ""
 	case "d":
-		m.deleteSelected()
+		m.confirmDeleteSelected()
 	case "J":
 		m.moveSelected(1)
 	case "K":
 		m.moveSelected(-1)
 	case "o":
-		// Contextual: on the settings tab this edits the config file,
-		// everywhere else the queue file.
-		if m.tab == TabSettings && m.opts.OnOpenConfig != nil {
-			return m, m.opts.OnOpenConfig()
-		}
 		if m.opts.OnOpenEditor != nil {
-			return m, m.opts.OnOpenEditor()
+			return m.opts.OnOpenEditor()
 		}
 	case " ":
 		m.controlSelected(func(row *Row) ControlAction {
@@ -424,7 +523,222 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "x":
 		m.controlSelected(func(*Row) ControlAction { return ControlCancel })
 	}
-	return m, nil
+	return nil
+}
+
+// handleCompletedKey is the completed page's own key map: scrolling plus
+// the two destructive actions, both behind a confirmation.
+func (m *Model) handleCompletedKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "down", "j":
+		m.moveHistorySelection(1)
+	case "up", "k":
+		m.moveHistorySelection(-1)
+	case "d":
+		if m.opts.OnDeleteCompleted == nil || len(m.opts.Completed) == 0 {
+			return nil
+		}
+		idx := m.selCompleted
+		entry := m.opts.Completed[idx]
+		m.confirm = &confirmPrompt{
+			Prompt: fmt.Sprintf("Delete this history entry?  %s", truncateDisplay(entry.Text, 48)),
+			OnYes: func(cur *Model) {
+				if err := cur.opts.OnDeleteCompleted(entry.Ref); err != nil {
+					cur.warn(err.Error())
+					return
+				}
+				cur.opts.Completed = append(cur.opts.Completed[:idx], cur.opts.Completed[idx+1:]...)
+				if cur.selCompleted >= len(cur.opts.Completed) && cur.selCompleted > 0 {
+					cur.selCompleted--
+				}
+				cur.clampHistorySelection()
+			},
+		}
+	case "c":
+		if m.opts.OnClearCompleted == nil || len(m.opts.Completed) == 0 {
+			return nil
+		}
+		m.confirm = &confirmPrompt{
+			Prompt: fmt.Sprintf("Clear the entire completed list (%d entries)?", len(m.opts.Completed)),
+			OnYes: func(cur *Model) {
+				if err := cur.opts.OnClearCompleted(); err != nil {
+					cur.warn(err.Error())
+					return
+				}
+				cur.opts.Completed = nil
+				cur.selCompleted = 0
+				cur.scrollCompleted = 0
+			},
+		}
+	}
+	return nil
+}
+
+// handleSettingsKey is the settings page's own key map: navigate, edit,
+// toggle, reset (confirmed).
+func (m *Model) handleSettingsKey(msg tea.KeyMsg) tea.Cmd {
+	if len(m.opts.Settings) == 0 {
+		return nil
+	}
+	sel := &m.opts.Settings[m.selSettings]
+	switch msg.String() {
+	case "down", "j":
+		m.moveSettingsSelection(1)
+	case "up", "k":
+		m.moveSettingsSelection(-1)
+	case "enter", "e":
+		if sel.Kind == SettingBool {
+			m.toggleSelectedBool()
+			return nil
+		}
+		m.inputActive = true
+		m.input = sel.Value
+		m.inputKey = sel.Key
+	case " ":
+		if sel.Kind == SettingBool {
+			m.toggleSelectedBool()
+		}
+	case "o":
+		if m.opts.OnOpenConfig != nil {
+			return m.opts.OnOpenConfig()
+		}
+	case "r":
+		key := sel.Key
+		d := m.defaultFor(key)
+		if m.opts.OnSettingReset == nil || d == "" || d == sel.Value {
+			return nil
+		}
+		m.confirm = &confirmPrompt{
+			Prompt: fmt.Sprintf("Reset %s to its default (%s)?", key, d),
+			OnYes: func(cur *Model) {
+				value, err := cur.opts.OnSettingReset(key)
+				if err != nil {
+					cur.warn(err.Error())
+					return
+				}
+				cur.setSettingValue(key, value)
+			},
+		}
+	case "R":
+		m.confirm = &confirmPrompt{
+			Prompt: "Reset all settings to their defaults?",
+			OnYes: func(cur *Model) {
+				if cur.opts.OnSettingsResetAll == nil {
+					return
+				}
+				rows, err := cur.opts.OnSettingsResetAll()
+				if err != nil {
+					cur.warn(err.Error())
+					return
+				}
+				cur.opts.Settings = rows
+				cur.clampSettingsSelection()
+			},
+		}
+	}
+	return nil
+}
+
+func (m *Model) toggleSelectedBool() {
+	sel := m.opts.Settings[m.selSettings]
+	next := "true"
+	if sel.Value == "true" {
+		next = "false"
+	}
+	key := sel.Key
+	if err := m.opts.OnSettingSet(key, next); err != nil {
+		m.warn(err.Error())
+		return
+	}
+	m.setSettingValue(key, next)
+}
+
+// defaultFor is the settings snapshot's default hint for a key, empty when
+// unknown (used only to phrase the reset question).
+func (m *Model) defaultFor(key string) string {
+	for _, s := range m.opts.Settings {
+		if s.Key == key && s.Kind == SettingBool {
+			return "false"
+		}
+	}
+	if def := defaultHints[key]; def != "" {
+		return def
+	}
+	return ""
+}
+
+// defaultHints mirrors cmd's setting defaults for dialog phrasing only.
+var defaultHints = map[string]string{
+	"num_chunks": "8",
+	"queue_jobs": "1",
+}
+
+func (m *Model) setSettingValue(key, value string) {
+	for i := range m.opts.Settings {
+		if m.opts.Settings[i].Key == key {
+			m.opts.Settings[i].Value = value
+			return
+		}
+	}
+}
+
+func (m *Model) warn(text string) {
+	m.warnings = append(m.warnings, text)
+	if len(m.warnings) > 3 {
+		m.warnings = m.warnings[len(m.warnings)-3:]
+	}
+}
+
+func (m *Model) clampSettingsSelection() {
+	if m.selSettings >= len(m.opts.Settings) {
+		m.selSettings = maxInt(0, len(m.opts.Settings)-1)
+	}
+	m.ensureSettingsVisible()
+}
+
+func (m *Model) moveSettingsSelection(delta int) {
+	if len(m.opts.Settings) == 0 {
+		return
+	}
+	m.selSettings = (m.selSettings + delta + len(m.opts.Settings)) % len(m.opts.Settings)
+	m.ensureSettingsVisible()
+}
+
+func (m *Model) ensureSettingsVisible() {
+	window := m.windowSize()
+	if m.selSettings < m.scrollSettings {
+		m.scrollSettings = m.selSettings
+	}
+	if m.selSettings >= m.scrollSettings+window {
+		m.scrollSettings = m.selSettings - window + 1
+	}
+	m.scrollSettings = clampInt(m.scrollSettings, 0, maxInt(0, len(m.opts.Settings)-window))
+}
+
+func (m *Model) clampHistorySelection() {
+	if m.selCompleted >= len(m.opts.Completed) {
+		m.selCompleted = maxInt(0, len(m.opts.Completed)-1)
+	}
+	m.ensureHistoryVisible()
+}
+
+func (m *Model) moveHistorySelection(delta int) {
+	if len(m.opts.Completed) == 0 {
+		return
+	}
+	m.selCompleted = (m.selCompleted + delta + len(m.opts.Completed)) % len(m.opts.Completed)
+	m.ensureHistoryVisible()
+}
+
+func (m *Model) ensureHistoryVisible() {
+	window := m.windowSize()
+	if m.selCompleted < m.scrollCompleted {
+		m.scrollCompleted = m.selCompleted
+	}
+	if m.selCompleted >= m.scrollCompleted+window {
+		m.scrollCompleted = m.selCompleted - window + 1
+	}
+	m.scrollCompleted = clampInt(m.scrollCompleted, 0, maxInt(0, len(m.opts.Completed)-window))
 }
 
 // handleInputKey drives the 'a' add line: printable runes accumulate
@@ -436,9 +750,25 @@ func (m Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputActive = false
 		m.input = ""
 	case tea.KeyEnter:
-		urls := parseURLList(m.input)
+		value := m.input
+		key := m.inputKey
 		m.inputActive = false
 		m.input = ""
+		m.inputKey = ""
+
+		if key != "" {
+			// Applying a settings value: validate, warn on refusal.
+			if m.opts.OnSettingSet != nil {
+				if err := m.opts.OnSettingSet(key, value); err != nil {
+					m.warn(err.Error())
+				} else {
+					m.setSettingValue(key, value)
+				}
+			}
+			return m, nil
+		}
+
+		urls := parseURLList(value)
 		if len(urls) > 0 && m.opts.OnAdd != nil {
 			ids := m.opts.OnAdd(urls)
 			for i, id := range ids {
@@ -451,8 +781,9 @@ func (m Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.KeyBackspace:
-		if n := len(m.input); n > 0 {
-			m.input = m.input[:n-1]
+		// Rune-safe: delete one visible character, not one byte.
+		if runes := []rune(m.input); len(runes) > 0 {
+			m.input = string(runes[:len(runes)-1])
 		}
 	case tea.KeySpace:
 		m.input += " "
@@ -474,20 +805,28 @@ func parseURLList(text string) []string {
 	return urls
 }
 
-func (m *Model) deleteSelected() {
+// confirmDeleteSelected asks before removing the selected file from the
+// queue (confirming also clears its queue-file line via OnDelete).
+func (m *Model) confirmDeleteSelected() {
 	if m.opts.OnDelete == nil || len(m.rows) == 0 {
 		return
 	}
 	if m.selected >= len(m.rows) {
 		m.selected = len(m.rows) - 1
 	}
-	row := m.rows[m.selected]
-	m.opts.OnDelete(row.ID)
-	m.rows = append(m.rows[:m.selected], m.rows[m.selected+1:]...)
-	if m.selected >= len(m.rows) && m.selected > 0 {
-		m.selected--
+	idx := m.selected
+	row := m.rows[idx]
+	m.confirm = &confirmPrompt{
+		Prompt: fmt.Sprintf("Remove from the queue?  %s", truncateDisplay(row.Label, 48)),
+		OnYes: func(cur *Model) {
+			cur.opts.OnDelete(row.ID)
+			cur.rows = append(cur.rows[:idx], cur.rows[idx+1:]...)
+			if cur.selected >= len(cur.rows) && cur.selected > 0 {
+				cur.selected--
+			}
+			cur.ensureSelectionVisible()
+		},
 	}
-	m.ensureSelectionVisible()
 }
 
 // moveSelected reorders the selected row within the queue.
@@ -607,9 +946,9 @@ func (m Model) View() string {
 	case TabDownloads:
 		b.WriteString(m.viewDownloads())
 	case TabCompleted:
-		b.WriteString(m.viewList(m.opts.Completed, "no completed downloads yet"))
+		b.WriteString(m.viewCompleted())
 	case TabSettings:
-		b.WriteString(m.clipBlock(m.opts.Settings))
+		b.WriteString(m.viewSettings())
 	}
 
 	for _, w := range m.warnings {
@@ -617,9 +956,21 @@ func (m Model) View() string {
 	}
 	b.WriteString("\n" + StyleDim.Render("─") + "\n")
 
+	// Modal layers replace the status/keys area.
+	if m.confirm != nil {
+		b.WriteString(StyleWarn.Render("confirm: ") + m.confirm.Prompt + "\n")
+		b.WriteString(StyleDim.Render("y/enter confirm · n/esc cancel"))
+		return b.String()
+	}
 	if m.inputActive {
-		b.WriteString(StyleStarting.Render("add url(s): ") + m.input + StyleDim.Render("▏"))
-		b.WriteString(StyleDim.Render("   enter to add · esc to cancel"))
+		label := "add url(s): "
+		hint := "enter to add · esc to cancel"
+		if m.inputKey != "" {
+			label = "set " + m.inputKey + " = "
+			hint = "enter to apply · esc to cancel"
+		}
+		b.WriteString(StyleStarting.Render(label) + m.input + StyleDim.Render("▏"))
+		b.WriteString(StyleDim.Render("   " + hint))
 		return b.String()
 	}
 
@@ -647,16 +998,28 @@ func (m Model) View() string {
 		}
 		b.WriteString(StyleDim.Render(status))
 	}
-	sKey := "s start all"
-	if m.activeCount() > 0 {
-		sKey = "s stop all"
-	}
-	b.WriteString("\n" + StyleDim.Render(fmt.Sprintf(
-		"space start/pause · %s · r retry · x cancel · a add · d delete · J/K move · o edit",
-		sKey,
-	)))
-	b.WriteString("\n" + StyleDim.Render("tab switch · j/k select · 1-3 tabs · ? help · q quit"))
+	b.WriteString("\n" + StyleDim.Render(m.pageHints()))
+	b.WriteString("\n" + StyleDim.Render("tab switch · 1-3 tabs · ? help · q quit"))
 	return b.String()
+}
+
+// pageHints is the per-page key reminder shown above the global line.
+func (m Model) pageHints() string {
+	switch m.tab {
+	case TabCompleted:
+		return "j/k scroll · d delete entry · c clear history"
+	case TabSettings:
+		return "j/k select · enter edit · space toggle · r reset · R reset all · o editor"
+	default:
+		sKey := "s start all"
+		if m.activeCount() > 0 {
+			sKey = "s stop all"
+		}
+		return fmt.Sprintf(
+			"space start/pause · %s · r retry · x cancel · a add · d delete · J/K move · o edit",
+			sKey,
+		)
+	}
 }
 
 // activeCount counts rows the engine is currently working on (set-up or
@@ -775,20 +1138,114 @@ func (m Model) viewDownloads() string {
 	return b.String()
 }
 
-func (m Model) viewList(items []string, empty string) string {
-	if len(items) == 0 {
-		return StyleDim.Render(empty) + "\n"
+// viewCompleted renders the history with its own cursor and scroll window.
+func (m Model) viewCompleted() string {
+	if len(m.opts.Completed) == 0 {
+		return StyleDim.Render("no completed downloads yet") + "\n"
 	}
 	window := m.windowSize()
+	end := m.scrollCompleted + window
+	if end > len(m.opts.Completed) {
+		end = len(m.opts.Completed)
+	}
+
 	var b strings.Builder
-	for i, item := range items {
-		if i >= window {
-			b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below  (full list: dlm ui, or completed.txt)", len(items)-i)) + "\n")
-			break
+	if m.scrollCompleted > 0 {
+		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▲ %d more above", m.scrollCompleted)) + "\n")
+	}
+	for i := m.scrollCompleted; i < end; i++ {
+		marker := "  "
+		if i == m.selCompleted {
+			marker = StyleTabActive.Render("▸ ")
 		}
-		// Items are pre-formatted by the caller (e.g. completed lines are
-		// "timestamp  file name"); only width-clip here.
-		b.WriteString("  " + truncateDisplay(item, m.contentWidth()-4) + "\n")
+		b.WriteString(marker + truncateDisplay(m.opts.Completed[i].Text, m.contentWidth()-2) + "\n")
+	}
+	if end < len(m.opts.Completed) {
+		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(m.opts.Completed)-end)) + "\n")
+	}
+	return b.String()
+}
+
+// viewSettings renders the config rows with their own cursor and window.
+func (m Model) viewSettings() string {
+	if len(m.opts.Settings) == 0 {
+		return StyleDim.Render("no settings available") + "\n"
+	}
+	window := m.windowSize()
+	end := m.scrollSettings + window
+	if end > len(m.opts.Settings) {
+		end = len(m.opts.Settings)
+	}
+
+	var b strings.Builder
+	if m.scrollSettings > 0 {
+		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▲ %d more above", m.scrollSettings)) + "\n")
+	}
+	keyWidth := 0
+	for _, st := range m.opts.Settings {
+		if len(st.Key) > keyWidth {
+			keyWidth = len(st.Key)
+		}
+	}
+	for i := m.scrollSettings; i < end; i++ {
+		st := m.opts.Settings[i]
+		marker := "  "
+		if i == m.selSettings {
+			marker = StyleTabActive.Render("▸ ")
+		}
+		value := st.Value
+		switch st.Kind {
+		case SettingBool:
+			if value == "true" {
+				value = StyleOK.Render(value)
+			} else {
+				value = StyleDim.Render(value)
+			}
+		case SettingInt:
+			value = StyleStarting.Render(value)
+		}
+		line := fmt.Sprintf("%s%-*s  %s", marker, keyWidth, st.Key, value)
+		if st.Help != "" {
+			line += "  " + StyleDim.Render(st.Help)
+		}
+		b.WriteString(truncateStyled(line, m.contentWidth()) + "\n")
+	}
+	if end < len(m.opts.Settings) {
+		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(m.opts.Settings)-end)) + "\n")
+	}
+	return b.String()
+}
+
+// truncateStyled clips a styled line to max visible cells, appending nothing
+// when it already fits.
+func truncateStyled(line string, max int) string {
+	if max <= 0 || lipglossWidth(line) <= max {
+		return line
+	}
+	// Cutting inside ANSI sequences would corrupt styling; keep whole
+	// glyphs by trimming visible runes from the end.
+	runes := []rune(stripANSI(line))
+	if len(runes) <= max-1 {
+		return line
+	}
+	return string(runes[:max-1]) + "…"
+}
+
+// stripANSI removes escape sequences, leaving the visible text.
+func stripANSI(s string) string {
+	var b strings.Builder
+	inEscape := false
+	for _, r := range s {
+		switch {
+		case inEscape:
+			if r == 'm' {
+				inEscape = false
+			}
+		case r == '\x1b':
+			inEscape = true
+		default:
+			b.WriteRune(r)
+		}
 	}
 	return b.String()
 }
@@ -799,18 +1256,6 @@ func (m Model) contentWidth() int {
 		return 100
 	}
 	return m.width
-}
-
-// clipBlock limits a multi-line body (settings) to the visible window.
-func (m Model) clipBlock(text string) string {
-	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	window := m.windowSize()
-	if len(lines) <= window {
-		return strings.Join(lines, "\n") + "\n"
-	}
-	shown := lines[:window-1]
-	shown = append(shown, StyleDim.Render(fmt.Sprintf("… %d more lines", len(lines)-window+1)))
-	return strings.Join(shown, "\n") + "\n"
 }
 
 // truncateDisplay shortens a plain (unstyled) string to max visible cells.

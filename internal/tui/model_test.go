@@ -15,9 +15,12 @@ func newTestModel() Model {
 			"https://example.com/FAB%20-%2022.mkv",
 			"https://example.com/FAB%20-%2023.mkv",
 		},
-		Completed: []string{"2026-10-11 10:01:22  FAB - 21.mkv"},
-		Settings:  "settings body",
-		Jobs:      2,
+		Completed: []HistoryEntry{{Text: "2026-10-11 10:01:22  FAB - 21.mkv", Ref: "raw-21"}},
+		Settings: []Setting{
+			{Key: "num_chunks", Value: "16", Kind: SettingInt, Help: "chunks"},
+			{Key: "insecure_skip_verify", Value: "false", Kind: SettingBool, Help: "tls"},
+		},
+		Jobs: 2,
 	})
 }
 
@@ -444,7 +447,7 @@ func TestBoardAddFlow(t *testing.T) {
 	}
 }
 
-func TestBoardDeleteSelected(t *testing.T) {
+func TestBoardDeleteSelectedAsksFirst(t *testing.T) {
 	var deleted int
 	m := NewModel(Options{
 		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv"},
@@ -452,9 +455,22 @@ func TestBoardDeleteSelected(t *testing.T) {
 		OnDelete:  func(id int) { deleted = id },
 	})
 
-	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}) // select b
-	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m = press(m, "j", "d") // select b, ask to delete
+	if m.confirm == nil {
+		t.Fatal("delete must ask for confirmation first")
+	}
+	if deleted != 0 {
+		t.Fatalf("nothing may be deleted before confirmation, got id %d", deleted)
+	}
 
+	// Cancelling leaves the file queued.
+	m = press(m, "n")
+	if deleted != 0 || len(m.rows) != 3 {
+		t.Fatalf("cancel must not delete: deleted=%d rows=%d", deleted, len(m.rows))
+	}
+
+	// Confirming removes the row and clears the queue-file line.
+	m = press(m, "d", "y")
 	if deleted != 1 {
 		t.Fatalf("deleted id = %d, want 1", deleted)
 	}
@@ -572,6 +588,7 @@ func TestBoardSettingsEditorIsContextual(t *testing.T) {
 	m := NewModel(Options{
 		QueueURLs:    []string{"https://x/a.mkv"},
 		Jobs:         1,
+		Settings:     []Setting{{Key: "num_chunks", Value: "8", Kind: SettingInt}},
 		OnOpenEditor: func() tea.Cmd { openedQueue = true; return nil },
 		OnOpenConfig: func() tea.Cmd { openedConfig = true; return nil },
 	})
@@ -590,9 +607,9 @@ func TestBoardSettingsEditorIsContextual(t *testing.T) {
 	}
 
 	// The refreshed snapshot text replaces the settings body.
-	m = update(m, SettingsMsg{Text: "refreshed settings body"})
-	if !strings.Contains(m.View(), "refreshed settings body") {
-		t.Fatalf("settings body not refreshed:\n%s", m.View())
+	m = update(m, SettingsMsg{Settings: []Setting{{Key: "queue_jobs", Value: "4", Kind: SettingInt}}})
+	if !strings.Contains(m.View(), "queue_jobs") {
+		t.Fatalf("settings rows not refreshed:\n%s", m.View())
 	}
 }
 
@@ -640,6 +657,233 @@ func TestBoardSpeedSparkline(t *testing.T) {
 	}
 }
 
+// boardHooks records which callbacks fire, for inertness/dialog tests.
+type boardHooks struct {
+	control   []ControlAction
+	add       int
+	del       int
+	delHist   []string
+	clearHist int
+	setKVs    []string
+	resets    []string
+	resetAll  int
+}
+
+func newHookedModel(h *boardHooks) Model {
+	return NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv"},
+		Completed: []HistoryEntry{
+			{Text: "2026-10-15 10:00:00  a.mkv", Ref: "raw-a"},
+			{Text: "2026-10-15 09:00:00  b.mkv", Ref: "raw-b"},
+		},
+		Settings: []Setting{
+			{Key: "num_chunks", Value: "16", Kind: SettingInt, Help: "chunks"},
+			{Key: "queue_jobs", Value: "1", Kind: SettingInt, Help: "jobs"},
+			{Key: "insecure_skip_verify", Value: "false", Kind: SettingBool, Help: "tls"},
+			{Key: "output_dir", Value: "/tmp/out", Kind: SettingText, Help: "dir"},
+		},
+		Jobs: 2,
+		OnControl: func(_ int, a ControlAction) {
+			h.control = append(h.control, a)
+		},
+		OnAdd:    func([]string) []int { h.add++; return nil },
+		OnDelete: func(int) { h.del++ },
+		OnSettingSet: func(key, value string) error {
+			h.setKVs = append(h.setKVs, key+"="+value)
+			return nil
+		},
+		OnSettingReset: func(key string) (string, error) {
+			h.resets = append(h.resets, key)
+			return "DEFAULT", nil
+		},
+		OnSettingsResetAll: func() ([]Setting, error) {
+			h.resetAll++
+			return []Setting{{Key: "num_chunks", Value: "8", Kind: SettingInt}}, nil
+		},
+		OnDeleteCompleted: func(ref string) error {
+			h.delHist = append(h.delHist, ref)
+			return nil
+		},
+		OnClearCompleted: func() error { h.clearHist++; return nil },
+	})
+}
+
+func press(m Model, keys ...string) Model {
+	for _, k := range keys {
+		var msg tea.KeyMsg
+		switch k {
+		case "enter":
+			msg = tea.KeyMsg{Type: tea.KeyEnter}
+		case "esc":
+			msg = tea.KeyMsg{Type: tea.KeyEsc}
+		default:
+			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+		}
+		m = update(m, msg)
+	}
+	return m
+}
+
+func TestBoardPerPageControlsAreScoped(t *testing.T) {
+	// Completed page: download-only keys must be inert.
+	h := &boardHooks{}
+	_ = press(press(newHookedModel(h), "2"), "s", "x", "a", "J")
+	if len(h.control) != 0 || h.add != 0 {
+		t.Fatalf("download-only keys acted on the completed page: %+v", h)
+	}
+	// Settings page: same rule (space only toggles bools).
+	h2 := &boardHooks{}
+	_ = press(press(newHookedModel(h2), "3"), "s", "x", "a", "d")
+	if len(h2.control) != 0 || h2.add != 0 || h2.del != 0 {
+		t.Fatalf("download-only keys acted on the settings page: %+v", h2)
+	}
+	if len(h2.setKVs) != 0 {
+		t.Fatalf("nothing should have been set yet: %v", h2.setKVs)
+	}
+
+	// Downloads page: downloads keys act (space starts the selected held file).
+	h3 := &boardHooks{}
+	_ = press(newHookedModel(h3), " ")
+	if len(h3.control) != 1 || h3.control[0] != ControlStart {
+		t.Fatalf("space on downloads must start the selected file: %+v", h3.control)
+	}
+}
+
+func TestBoardConfirmDialogGatesDestructiveActions(t *testing.T) {
+	h := &boardHooks{}
+	m := press(newHookedModel(h), "3") // settings
+	m = press(m, "r")                  // reset num_chunks
+	if m.confirm == nil {
+		t.Fatal("r must ask for confirmation first")
+	}
+	if !strings.Contains(m.View(), "Reset num_chunks") {
+		t.Fatalf("dialog prompt missing:\n%s", m.View())
+	}
+
+	// Everything is swallowed while the question is open — including q.
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}}); cmd != nil {
+		t.Fatal("q must not quit while a confirmation is open")
+	}
+	m = press(m, "s") // also inert
+	if len(h.resets) != 0 || h.resetAll != 0 {
+		t.Fatalf("no action may run before confirmation: %+v", h)
+	}
+
+	// Cancel leaves everything untouched.
+	m = press(m, "n")
+	if m.confirm != nil || len(h.resets) != 0 {
+		t.Fatalf("cancel must not act: confirm=%v resets=%v", m.confirm, h.resets)
+	}
+
+	// Confirm runs the action and updates the row.
+	m = press(m, "r", "y")
+	if len(h.resets) != 1 || h.resets[0] != "num_chunks" {
+		t.Fatalf("confirm must run the reset: %+v", h.resets)
+	}
+	if !strings.Contains(m.View(), "DEFAULT") {
+		t.Fatalf("row value must be refreshed after reset:\n%s", m.View())
+	}
+}
+
+func TestBoardCompletedPageDeleteAndClear(t *testing.T) {
+	h := &boardHooks{}
+	m := press(newHookedModel(h), "2") // completed
+
+	m = press(m, "j") // second entry
+	m = press(m, "d", "y")
+	if len(h.delHist) != 1 || h.delHist[0] != "raw-b" {
+		t.Fatalf("delete must target the selected entry: %+v", h.delHist)
+	}
+	if strings.Contains(m.View(), "b.mkv") {
+		t.Fatalf("deleted entry must disappear:\n%s", m.View())
+	}
+
+	m = press(m, "c", "y")
+	if h.clearHist != 1 {
+		t.Fatalf("clear must run after confirmation: %+v", h)
+	}
+	if !strings.Contains(m.View(), "no completed downloads yet") {
+		t.Fatalf("history must be empty:\n%s", m.View())
+	}
+}
+
+func TestBoardSettingsEditingAndValidation(t *testing.T) {
+	h := &boardHooks{}
+	m := press(newHookedModel(h), "3")
+
+	// Enter opens the editor seeded with the current value.
+	m = press(m, "enter")
+	if !m.inputActive || m.input != "16" || m.inputKey != "num_chunks" {
+		t.Fatalf("editor not seeded: active=%v input=%q key=%q", m.inputActive, m.input, m.inputKey)
+	}
+	m = press(m, "esc")
+	if m.inputActive {
+		t.Fatal("esc must cancel the edit")
+	}
+
+	// Typing a new value applies it through the hook.
+	m = press(m, "enter")
+	m = update(m, tea.KeyMsg{Type: tea.KeyBackspace}) // drop the "6"
+	m = press(m, "8", "enter")
+	if len(h.setKVs) != 1 || h.setKVs[0] != "num_chunks=18" {
+		t.Fatalf("typed value not applied: %v", h.setKVs)
+	}
+	if !strings.Contains(m.View(), "18") {
+		t.Fatalf("row value must update:\n%s", m.View())
+	}
+
+	// A refused value warns and leaves the row alone.
+	h.setKVs = nil
+	m = NewModel(Options{
+		Settings: []Setting{{Key: "num_chunks", Value: "8", Kind: SettingInt}},
+		OnSettingSet: func(string, string) error {
+			return fmt.Errorf("num_chunks cannot exceed 16")
+		},
+	})
+	m = press(m, "3", "enter")
+	m = press(m, "99", "enter")
+	if !strings.Contains(m.View(), "cannot exceed") {
+		t.Fatalf("validation warning missing:\n%s", m.View())
+	}
+	if !strings.Contains(m.View(), "8") {
+		t.Fatalf("row must keep the old value:\n%s", m.View())
+	}
+}
+
+func TestBoardSettingsBoolToggleAndResetAll(t *testing.T) {
+	h := &boardHooks{}
+	m := press(newHookedModel(h), "3")
+	m = press(m, "j", "j") // insecure_skip_verify (third row)
+
+	m = press(m, " ") // space toggles a bool
+	if len(h.setKVs) != 1 || h.setKVs[0] != "insecure_skip_verify=true" {
+		t.Fatalf("bool toggle not applied: %v", h.setKVs)
+	}
+	m = press(m, " ")
+	if h.setKVs[1] != "insecure_skip_verify=false" {
+		t.Fatalf("second toggle must flip back: %v", h.setKVs)
+	}
+
+	m = press(m, "R", "y")
+	if h.resetAll != 1 {
+		t.Fatalf("reset-all must run after confirmation: %+v", h)
+	}
+	if !strings.Contains(m.View(), "num_chunks") {
+		t.Fatalf("reset rows must be applied:\n%s", m.View())
+	}
+}
+
+func TestBoardInputBackspaceIsRuneSafe(t *testing.T) {
+	m := NewModel(Options{QueueURLs: []string{"https://x/a.mkv"}, Jobs: 1})
+	m = press(m, "a")
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("☂ü")})
+	m = update(m, tea.KeyMsg{Type: tea.KeyBackspace})
+
+	if m.input != "☂" {
+		t.Fatalf("backspace must remove one rune, got %q", m.input)
+	}
+}
+
 func TestBoardWarningsAreCappedAndShown(t *testing.T) {
 	m := newTestModel()
 	for i := 0; i < 5; i++ {
@@ -673,8 +917,8 @@ func TestBoardTabSwitching(t *testing.T) {
 	if m.tab != TabSettings {
 		t.Fatalf("tab = %v, want settings", m.tab)
 	}
-	if !strings.Contains(m.View(), "settings body") {
-		t.Errorf("settings tab must show the snapshot body:\n%s", m.View())
+	if !strings.Contains(m.View(), "num_chunks") {
+		t.Errorf("settings tab must list config keys:\n%s", m.View())
 	}
 
 	m = update(m, tea.KeyMsg{Type: tea.KeyTab})
