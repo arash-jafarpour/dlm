@@ -938,8 +938,7 @@ func TestBoardCompletedTabRefreshesSummary(t *testing.T) {
 	}
 
 	// A finished run refreshes it again while the tab is showing.
-	next, cmd = m.Update(RunFinishedMsg{})
-	m = next.(Model)
+	_, cmd = m.Update(RunFinishedMsg{})
 	if calls != 2 || cmd == nil {
 		t.Fatalf("a finished run must refresh the summary: calls=%d cmd=%v", calls, cmd)
 	}
