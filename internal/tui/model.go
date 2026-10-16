@@ -253,20 +253,40 @@ type confirmPrompt struct {
 }
 
 // windowSize is how many list rows fit on screen: terminal height minus the
-// chrome (header, tabs, separator, warnings, footer). Falls back to a fixed
-// default until the terminal reports its size.
+// chrome (header, tabs, separators, warnings, status/hints/footer), the
+// tab's fixed body lines, and room for the ▲/▼ scroll markers. It must match
+// what View actually emits: bubbletea drops lines off the top when a frame
+// is taller than the terminal, which would hide the header.
 func (m Model) windowSize() int {
 	if m.height <= 0 {
 		return defaultVisibleRows
 	}
-	n := m.height - 7 - 2*len(m.warnings)
-	if m.tab == TabCompleted {
-		n -= m.completedSummaryLines()
+	// Chrome lines: header, tab strip, top separator, footer separator,
+	// status, hints, footer — plus one per transient warning.
+	n := m.height - 7 - len(m.warnings)
+	// Body lines a tab spends on fixed content rather than list rows.
+	n -= m.tabExtraLines()
+	// Room for the "more above" / "more below" markers so a scrolled list
+	// still fits the frame. The summary tab is fixed-height (no window).
+	if m.tab != TabSummary {
+		n -= 2
 	}
-	if n < 3 {
-		n = 3
+	if n < 1 {
+		n = 1
 	}
 	return n
+}
+
+// tabExtraLines counts the body lines a tab spends on fixed content rather
+// than list rows: the completed roll-up and the settings notes.
+func (m Model) tabExtraLines() int {
+	switch m.tab {
+	case TabCompleted:
+		return m.completedSummaryLines()
+	case TabSettings:
+		return 2 // the two "note:" lines under the list
+	}
+	return 0
 }
 
 // completedSummaryLines counts the body lines the completed tab spends on
@@ -1016,21 +1036,25 @@ func (m Model) View() string {
 	b.WriteString(strings.Join(tabs, StyleDim.Render(" · ")) + "\n")
 	b.WriteString(StyleDim.Render(strings.Repeat("─", maxInt(10, m.width))) + "\n")
 
+	var body string
 	switch m.tab {
 	case TabDownloads:
-		b.WriteString(m.viewDownloads())
+		body = m.viewDownloads()
 	case TabCompleted:
-		b.WriteString(m.viewCompleted())
+		body = m.viewCompleted()
 	case TabSettings:
-		b.WriteString(m.viewSettings())
+		body = m.viewSettings()
 	case TabSummary:
-		b.WriteString(m.viewSummary())
+		body = m.viewSummary()
 	}
+	// Exactly one newline after the body: any more would add a phantom line
+	// that pushes the header off a full-height frame.
+	b.WriteString(strings.TrimRight(body, "\n") + "\n")
 
 	for _, w := range m.warnings {
-		b.WriteString("\n" + StyleWarn.Render(w))
+		b.WriteString(StyleWarn.Render(w) + "\n")
 	}
-	b.WriteString("\n" + StyleDim.Render("─") + "\n")
+	b.WriteString(StyleDim.Render("─") + "\n")
 
 	// Modal layers replace the status/keys area.
 	if m.confirm != nil {

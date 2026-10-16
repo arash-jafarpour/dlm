@@ -210,16 +210,16 @@ func TestBoardScrollingWindow(t *testing.T) {
 		urls[i] = fmt.Sprintf("https://x/file-%02d.mkv", i)
 	}
 	m := NewModel(Options{QueueURLs: urls, Jobs: 2})
-	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 17}) // window of 10 rows
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 17}) // window of 8 rows
 
 	view := m.View()
-	if !strings.Contains(view, "file-00.mkv") || !strings.Contains(view, "file-09.mkv") {
-		t.Fatalf("first window must show rows 0-9:\n%s", view)
+	if !strings.Contains(view, "file-00.mkv") || !strings.Contains(view, "file-07.mkv") {
+		t.Fatalf("first window must show rows 0-7:\n%s", view)
 	}
-	if strings.Contains(view, "file-10.mkv") {
-		t.Fatalf("row 10 must be outside the window:\n%s", view)
+	if strings.Contains(view, "file-08.mkv") {
+		t.Fatalf("row 8 must be outside the window:\n%s", view)
 	}
-	if !strings.Contains(view, "▼ 15 more below") {
+	if !strings.Contains(view, "▼ 17 more below") {
 		t.Fatalf("bottom indicator missing:\n%s", view)
 	}
 	if strings.Contains(view, "▲") {
@@ -231,10 +231,10 @@ func TestBoardScrollingWindow(t *testing.T) {
 		m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	}
 	view = m.View()
-	if m.selected != 11 || m.scrollOffset != 2 {
-		t.Fatalf("selection=%d offset=%d, want 11/2", m.selected, m.scrollOffset)
+	if m.selected != 11 || m.scrollOffset != 4 {
+		t.Fatalf("selection=%d offset=%d, want 11/4", m.selected, m.scrollOffset)
 	}
-	if !strings.Contains(view, "▲ 2 more above") {
+	if !strings.Contains(view, "▲ 4 more above") {
 		t.Fatalf("top indicator missing:\n%s", view)
 	}
 	if strings.Contains(view, "file-00.mkv") {
@@ -264,7 +264,7 @@ func TestBoardScrollingWindow(t *testing.T) {
 	if strings.Contains(view, "▼") {
 		t.Fatalf("nothing is below the last window:\n%s", view)
 	}
-	if !strings.Contains(view, "▲ 15 more above") {
+	if !strings.Contains(view, "▲ 17 more above") {
 		t.Fatalf("top indicator for the last window:\n%s", view)
 	}
 }
@@ -281,10 +281,10 @@ func TestBoardWindowAdaptsToTerminalHeight(t *testing.T) {
 	short := NewModel(Options{QueueURLs: urls, Jobs: 2})
 	short = update(short, tea.WindowSizeMsg{Width: 120, Height: 12})
 	view := short.View()
-	if !strings.Contains(view, "file-04.mkv") || strings.Contains(view, "file-05.mkv") {
-		t.Fatalf("height 12 should show 5 rows:\n%s", view)
+	if !strings.Contains(view, "file-02.mkv") || strings.Contains(view, "file-03.mkv") {
+		t.Fatalf("height 12 should show 3 rows:\n%s", view)
 	}
-	if !strings.Contains(view, "▼ 20 more below") {
+	if !strings.Contains(view, "▼ 22 more below") {
 		t.Fatalf("bottom marker wrong for height 12:\n%s", view)
 	}
 
@@ -297,6 +297,55 @@ func TestBoardWindowAdaptsToTerminalHeight(t *testing.T) {
 	}
 	if strings.Contains(view, "▲") || strings.Contains(view, "▼") {
 		t.Fatalf("no scroll markers expected when all rows fit:\n%s", view)
+	}
+}
+
+// TestBoardViewFitsTerminalHeight: whatever the tab, item count or scroll
+// position, the rendered frame never grows past the terminal. bubbletea drops
+// lines off the top of an oversized frame, which is what hid the header.
+func TestBoardViewFitsTerminalHeight(t *testing.T) {
+	for _, h := range []int{12, 17, 24, 40} {
+		for _, n := range []int{0, 1, 5, 20, 50} {
+			urls := make([]string, n)
+			completed := make([]HistoryEntry, n)
+			settings := make([]Setting, n)
+			for i := 0; i < n; i++ {
+				urls[i] = fmt.Sprintf("https://x/file-%02d.mkv", i)
+				completed[i] = HistoryEntry{
+					Text: fmt.Sprintf("2026-10-15 10:00:00  entry-%02d.mkv", i),
+					Ref:  fmt.Sprintf("raw-%d", i),
+				}
+				settings[i] = Setting{Key: fmt.Sprintf("key_%02d", i), Value: "x", Kind: SettingText}
+			}
+
+			base := NewModel(Options{
+				QueueURLs: urls,
+				Completed: completed,
+				Settings:  settings,
+				Jobs:      2,
+				Summary:   Summary{Count: n, Dir: "/downloads", Files: n},
+			})
+			base = update(base, tea.WindowSizeMsg{Width: 100, Height: h})
+
+			for _, tab := range []Tab{TabDownloads, TabCompleted, TabSettings, TabSummary} {
+				m := base
+				m.tab = tab
+
+				// Exercise a scrolled window too: select the last item so the
+				// markers have to share the frame.
+				for i := 0; i < n; i++ {
+					m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+				}
+
+				view := m.View()
+				if lines := len(strings.Split(view, "\n")); lines > h {
+					t.Errorf("height %d, %d items, tab %d: view is %d lines:\n%s", h, n, tab, lines, view)
+				}
+				if !strings.HasPrefix(stripANSI(view), "dlm") {
+					t.Errorf("height %d, %d items, tab %d: header trimmed:\n%s", h, n, tab, view)
+				}
+			}
+		}
 	}
 }
 
