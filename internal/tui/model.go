@@ -170,10 +170,10 @@ type Options struct {
 	// OnReorder persists the new order (job ids in display order).
 	OnReorder func(ids []int)
 	// OnOpenEditor suspends the board and opens the queue file in $EDITOR;
-	// the returned command must deliver a QueueReloadMsg afterwards.
+	// the returned command must deliver an EditorClosedMsg afterwards.
 	OnOpenEditor func() tea.Cmd
 	// OnOpenConfig opens the config file in $EDITOR; the returned command
-	// must deliver a SettingsMsg with the refreshed rows.
+	// must deliver an EditorClosedMsg with the refreshed rows.
 	OnOpenConfig func() tea.Cmd
 	// OnOpenDir hands the downloads directory to the OS file manager; the
 	// returned command warns when the opener fails. Nil disables 'O'.
@@ -507,14 +507,16 @@ type JobRef struct {
 	URL string
 }
 
-// QueueReloadMsg replaces the board's job list after the queue file was
-// edited externally ($EDITOR). cmd reconciles the engine first and sends
-// the resulting job set.
-type QueueReloadMsg struct{ Jobs []JobRef }
-
-// SettingsMsg refreshes the settings rows (after the config file was
-// edited externally or reset to defaults).
-type SettingsMsg struct{ Settings []Setting }
+// EditorClosedMsg is delivered when a suspended $EDITOR (queue or config)
+// exits and the terminal is back. Bubbletea's release/restore pair restores
+// the alternate screen, bracketed paste and focus reporting, but not mouse
+// tracking, so the board re-arms it here. Jobs carries the reconciled queue,
+// Settings the reloaded config rows, and Err a failed launch or reload.
+type EditorClosedMsg struct {
+	Jobs     []JobRef
+	Settings []Setting
+	Err      string
+}
 
 // SummaryMsg refreshes the board's dashboard totals (completed history,
 // output dir, queue depth).
@@ -553,6 +555,15 @@ func bellCmd() tea.Cmd {
 		fmt.Fprint(bellOut, "\a")
 		return nil
 	}
+}
+
+// restoreMouseTracking re-arms mouse reporting after a suspended program.
+// Bubbletea's ReleaseTerminal/RestoreTerminal pair disables mouse tracking on
+// the way out and restores only the alt screen, paste and focus reporting on
+// the way back, so without this the board loses clicks and the wheel after
+// returning from $EDITOR.
+func restoreMouseTracking() tea.Cmd {
+	return func() tea.Msg { return tea.EnableMouseCellMotion() }
 }
 
 // checkUpdate starts the background release check, if cmd wired one.
@@ -623,16 +634,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 
-	case QueueReloadMsg:
-		m.applyReload(msg.Jobs)
-		return m, nil
+	case tea.ResumeMsg:
+		// A Ctrl+Z suspension goes through the same release/restore pair as
+		// $EDITOR, so mouse tracking needs re-arming here too.
+		return m, restoreMouseTracking()
 
-	case SettingsMsg:
-		m.opts.Settings = msg.Settings
-		if m.selSettings >= len(m.opts.Settings) {
-			m.selSettings = maxInt(0, len(m.opts.Settings)-1)
+	case EditorClosedMsg:
+		// The terminal came back from $EDITOR: re-enable mouse reporting,
+		// which the release/restore pair turns off and does not restore.
+		cmd := restoreMouseTracking()
+		switch {
+		case msg.Err != "":
+			m.warn(msg.Err)
+		case msg.Settings != nil:
+			m.opts.Settings = msg.Settings
+			if m.selSettings >= len(m.opts.Settings) {
+				m.selSettings = maxInt(0, len(m.opts.Settings)-1)
+			}
+		case msg.Jobs != nil:
+			m.applyReload(msg.Jobs)
 		}
-		return m, nil
+		return m, cmd
 
 	case SummaryMsg:
 		m.opts.Summary = msg.Summary

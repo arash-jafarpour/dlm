@@ -855,7 +855,7 @@ func TestBoardEditorReload(t *testing.T) {
 		t.Fatal("o must trigger the editor hook")
 	}
 
-	m = update(m, QueueReloadMsg{Jobs: reloaded})
+	m = update(m, EditorClosedMsg{Jobs: reloaded})
 	if len(m.rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(m.rows))
 	}
@@ -923,7 +923,7 @@ func TestBoardSettingsEditorIsContextual(t *testing.T) {
 	}
 
 	// The refreshed snapshot text replaces the settings body.
-	m = update(m, SettingsMsg{Settings: []Setting{{Key: "queue_jobs", Value: "4", Kind: SettingInt}}})
+	m = update(m, EditorClosedMsg{Settings: []Setting{{Key: "queue_jobs", Value: "4", Kind: SettingInt}}})
 	if !strings.Contains(m.View(), "queue_jobs") {
 		t.Fatalf("settings rows not refreshed:\n%s", m.View())
 	}
@@ -2322,5 +2322,42 @@ func TestBoardMouseClickOnCompletedDoesNotToggle(t *testing.T) {
 	m = update(m, mouseClick(y, x))
 	if controls != 0 {
 		t.Fatalf("completed clicks must not start or stop anything: %d controls", controls)
+	}
+}
+
+// TestBoardReEnablesMouseAfterEditor: bubbletea's release/restore pair turns
+// mouse tracking off and does not turn it back on, so every editor return
+// must re-arm it — success, queue edit, config edit or failure alike.
+func TestBoardReEnablesMouseAfterEditor(t *testing.T) {
+	cases := []EditorClosedMsg{
+		{Jobs: []JobRef{{ID: 0, URL: "https://x/a.mkv"}}},
+		{Settings: []Setting{{Key: "queue_jobs", Value: "4", Kind: SettingInt}}},
+		{Err: "editor: exit status 1"},
+	}
+	for i, msg := range cases {
+		m := newTestModel()
+		next, cmd := m.Update(msg)
+		if cmd == nil {
+			t.Fatalf("case %d: editor return must re-enable the mouse", i)
+		}
+		if got := cmd(); got != tea.EnableMouseCellMotion() {
+			t.Fatalf("case %d: command produced %#v, want the mouse-enable message", i, got)
+		}
+		if i == len(cases)-1 && !strings.Contains(next.(Model).View(), "exit status 1") {
+			t.Fatalf("case %d: the editor failure must be warned:\n%s", i, next.(Model).View())
+		}
+	}
+}
+
+// TestBoardReEnablesMouseAfterSuspend: Ctrl+Z takes the same release/restore
+// path as the editor, so resuming must re-arm the mouse as well.
+func TestBoardReEnablesMouseAfterSuspend(t *testing.T) {
+	m := newTestModel()
+	_, cmd := m.Update(tea.ResumeMsg{})
+	if cmd == nil {
+		t.Fatal("resume must re-enable the mouse")
+	}
+	if got := cmd(); got != tea.EnableMouseCellMotion() {
+		t.Fatalf("resume produced %#v, want the mouse-enable message", got)
 	}
 }

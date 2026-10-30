@@ -280,9 +280,9 @@ func runBoard(ctx *Context, urls []string, inline bool) error {
 			cmd := editorCommand(ctx.Config.QueueFile)
 			return tea.ExecProcess(cmd, func(err error) tea.Msg {
 				if err != nil {
-					return tui.WarnMsg{Text: fmt.Sprintf("editor: %v", err)}
+					return tui.EditorClosedMsg{Err: fmt.Sprintf("editor: %v", err)}
 				}
-				return tui.QueueReloadMsg{Jobs: bq.reload()}
+				return tui.EditorClosedMsg{Jobs: bq.reload()}
 			})
 		},
 		OnOpenConfig: func() tea.Cmd {
@@ -293,16 +293,16 @@ func runBoard(ctx *Context, urls []string, inline bool) error {
 			cmd := editorCommand(cfgPath)
 			return tea.ExecProcess(cmd, func(err error) tea.Msg {
 				if err != nil {
-					return tui.WarnMsg{Text: fmt.Sprintf("editor: %v", err)}
+					return tui.EditorClosedMsg{Err: fmt.Sprintf("editor: %v", err)}
 				}
 				// Re-read the file so external edits land in the board and
 				// in-memory config.
 				if reloaded, err := config.Load(cfgPath); err == nil {
 					*ctx.Config = *reloaded
 				} else {
-					return tui.WarnMsg{Text: fmt.Sprintf("config: %v", err)}
+					return tui.EditorClosedMsg{Err: fmt.Sprintf("config: %v", err)}
 				}
-				return tui.SettingsMsg{Settings: settingsRows(ctx.Config)}
+				return tui.EditorClosedMsg{Settings: settingsRows(ctx.Config)}
 			})
 		},
 		OnOpenDir: func() tea.Cmd {
