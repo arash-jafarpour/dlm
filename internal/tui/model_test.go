@@ -2361,3 +2361,50 @@ func TestBoardReEnablesMouseAfterSuspend(t *testing.T) {
 		t.Fatalf("resume produced %#v, want the mouse-enable message", got)
 	}
 }
+
+// TestBoardMouseClickEditsSetting: a click on a settings row does what enter
+// does — booleans flip in place, everything else opens the input line seeded
+// with the current value.
+func TestBoardMouseClickEditsSetting(t *testing.T) {
+	h := &boardHooks{}
+	m := press(newHookedModel(h), "3")
+
+	// Int row: click opens the edit line with its value.
+	y, x := lineWith(t, m, "num_chunks")
+	m = update(m, mouseClick(y, x))
+	if !m.inputActive || m.inputKey != "num_chunks" || m.input != "16" {
+		t.Fatalf("click must open the editor: active=%v key=%q value=%q",
+			m.inputActive, m.inputKey, m.input)
+	}
+	if !strings.Contains(stripANSI(m.View()), "set num_chunks = 16") {
+		t.Fatalf("input line missing:\n%s", m.View())
+	}
+
+	// esc closes it without applying anything.
+	m = press(m, "esc")
+	if m.inputActive || len(h.setKVs) != 0 {
+		t.Fatalf("esc must cancel the click-opened editor: active=%v set=%v", m.inputActive, h.setKVs)
+	}
+
+	// Bool row: click toggles and persists in place.
+	y, x = lineWith(t, m, "insecure_skip_verify")
+	m = update(m, mouseClick(y, x))
+	if m.inputActive {
+		t.Fatal("a boolean must toggle, not open the input line")
+	}
+	if fmt.Sprint(h.setKVs) != "[insecure_skip_verify=true]" {
+		t.Fatalf("boolean click must persist the toggle: %v", h.setKVs)
+	}
+	if !strings.Contains(stripANSI(m.View()), "insecure_skip_verify  true") {
+		t.Fatalf("row value not refreshed:\n%s", m.View())
+	}
+
+	// The note lines under the list are not settings.
+	sel := m.selSettings
+	y, x = lineWith(t, m, "note: restart dlm")
+	m = update(m, mouseClick(y, x))
+	if m.inputActive || m.selSettings != sel {
+		t.Fatalf("clicking a note must do nothing: active=%v selection=%d→%d",
+			m.inputActive, sel, m.selSettings)
+	}
+}

@@ -915,13 +915,7 @@ func (m *Model) handleSettingsKey(msg tea.KeyMsg) tea.Cmd {
 	case "up", "k":
 		m.moveSettingsSelection(-1)
 	case "enter", "e":
-		if sel.Kind == SettingBool {
-			m.toggleSelectedBool()
-			return nil
-		}
-		m.inputActive = true
-		m.input = sel.Value
-		m.inputKey = sel.Key
+		m.editSelectedSetting()
 	case " ":
 		if sel.Kind == SettingBool {
 			m.toggleSelectedBool()
@@ -967,13 +961,36 @@ func (m *Model) handleSettingsKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+// editSelectedSetting is the settings page's edit action, shared by enter/e
+// and by a click on a settings row: booleans toggle in place, everything else
+// opens the input line seeded with the current value.
+func (m *Model) editSelectedSetting() {
+	if len(m.opts.Settings) == 0 || m.selSettings < 0 || m.selSettings >= len(m.opts.Settings) {
+		return
+	}
+	sel := m.opts.Settings[m.selSettings]
+	if sel.Kind == SettingBool {
+		m.toggleSelectedBool()
+		return
+	}
+	m.inputActive = true
+	m.input = sel.Value
+	m.inputKey = sel.Key
+}
+
 func (m *Model) toggleSelectedBool() {
+	if len(m.opts.Settings) == 0 || m.selSettings < 0 || m.selSettings >= len(m.opts.Settings) {
+		return
+	}
 	sel := m.opts.Settings[m.selSettings]
 	next := "true"
 	if sel.Value == "true" {
 		next = "false"
 	}
 	key := sel.Key
+	if m.opts.OnSettingSet == nil {
+		return // read-only board (tests, or a caller that disabled editing)
+	}
 	if err := m.opts.OnSettingSet(key, next); err != nil {
 		m.warn(err.Error())
 		return
@@ -1101,6 +1118,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case TabSettings:
 		m.selSettings = idx
 		m.ensureSettingsVisible()
+		// A click on a setting edits it, exactly like enter: booleans
+		// toggle in place, the rest open the input line.
+		m.editSelectedSetting()
 	}
 	return m, nil
 }
@@ -2383,7 +2403,7 @@ func (m Model) viewHelp() string {
 		"",
 		StyleDim.Render("board"),
 		"  1-4, tab   downloads / completed / settings / summary",
-		"  mouse      click a tab · click a download to start/stop it · wheel scrolls",
+		"  mouse      click a tab · click a download to start/stop it · click a setting to edit",
 		"  O          open the downloads folder in your file manager",
 		"  ?          this help · q quit (the run stops, parts resume later)",
 		"",

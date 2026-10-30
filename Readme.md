@@ -194,9 +194,10 @@ accepts, `n`/`esc` cancels.
 
 The board takes the mouse too: click a name in the tab strip to switch
 pages, click a downloads row to start that file (click it again to stop
-it, exactly like `space`), and use the wheel to scroll the current list.
-Clicks on the completed and settings pages only move the cursor;
-destructive actions still need their key and confirmation.
+it, exactly like `space`), and click a setting to edit it — booleans flip
+in place, the rest open the same input line `enter` does. The wheel
+scrolls the current list; completed rows only move the cursor on click,
+and destructive actions still need their key and confirmation.
 
 `O` opens the downloads folder in your file manager, from either the
 downloads or the completed page. The board creates the folder first, so a
