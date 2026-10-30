@@ -301,6 +301,13 @@ func (m Model) windowSize() int {
 	if m.updateLineShown() {
 		n--
 	}
+	// Key hints wrap to as many lines as the width needs; the chrome
+	// constant above counts one.
+	if !m.modalOpen() {
+		if extra := m.hintLines() - 1; extra > 0 {
+			n -= extra
+		}
+	}
 	// Body lines a tab spends on fixed content rather than list rows.
 	n -= m.tabExtraLines()
 	// Room for the "more above" / "more below" markers so a scrolled list
@@ -312,6 +319,86 @@ func (m Model) windowSize() int {
 		n = 1
 	}
 	return n
+}
+
+// modalOpen reports whether a prompt (confirm, input, filter) currently
+// replaces the status/keys area at the bottom of the board.
+func (m Model) modalOpen() bool {
+	return m.confirm != nil || m.inputActive || m.filterState(m.tab).open
+}
+
+// hintLines is how many lines the page's key hints occupy at the current
+// width. Hints wrap at " · " boundaries instead of being clipped, so no key
+// disappears on a narrow terminal.
+func (m Model) hintLines() int {
+	return len(wrapHint(m.pageHints(), m.contentWidth()))
+}
+
+// wrapHint packs hint segments ("a · b · c") into lines no wider than width,
+// breaking only between segments so a key label never splits across lines.
+// When the result is two very uneven lines, it rebalances them at the segment
+// boundary nearest the middle.
+func wrapHint(hint string, width int) []string {
+	if width <= 0 {
+		return []string{hint}
+	}
+	segs := strings.Split(hint, " · ")
+	lines := packHintSegments(segs, width)
+	if len(lines) == 2 && lipglossWidth(lines[0]) > width*3/4 {
+		if balanced := balanceHintSegments(segs, width); balanced != nil {
+			return balanced
+		}
+	}
+	return lines
+}
+
+// packHintSegments greedily fills lines with whole segments.
+func packHintSegments(segs []string, width int) []string {
+	var lines []string
+	cur := ""
+	for _, seg := range segs {
+		cand := seg
+		if cur != "" {
+			cand = cur + " · " + seg
+		}
+		if cur == "" || lipglossWidth(cand) <= width {
+			cur = cand
+			continue
+		}
+		lines = append(lines, cur)
+		cur = seg
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	if len(lines) == 0 {
+		return []string{strings.Join(segs, " · ")}
+	}
+	return lines
+}
+
+// balanceHintSegments splits the segments in two as evenly as the width
+// allows, avoiding the "long line plus one stray key" look of a greedy wrap.
+func balanceHintSegments(segs []string, width int) []string {
+	best, bestWidest := -1, 0
+	for k := 1; k < len(segs); k++ {
+		left := strings.Join(segs[:k], " · ")
+		right := strings.Join(segs[k:], " · ")
+		wl, wr := lipglossWidth(left), lipglossWidth(right)
+		if wl > width || wr > width {
+			continue
+		}
+		if widest := maxInt(wl, wr); best < 0 || widest < bestWidest {
+			best, bestWidest = k, widest
+		}
+	}
+	if best < 0 {
+		return nil
+	}
+	return []string{
+		strings.Join(segs[:best], " · "),
+		strings.Join(segs[best:], " · "),
+	}
 }
 
 // tabExtraLines counts the body lines a tab spends on fixed content rather
@@ -677,6 +764,12 @@ func (m *Model) handleDownloadsKey(msg tea.KeyMsg) tea.Cmd {
 		m.moveSelected(1)
 	case "K":
 		m.moveSelected(-1)
+	case "g", "ctrl+up":
+		m.moveSelectedToEdge(true)
+	case "G", "ctrl+down":
+		m.moveSelectedToEdge(false)
+	case "R":
+		m.retryAllFailed()
 	case "o":
 		if m.opts.OnOpenEditor != nil {
 			return m.opts.OnOpenEditor()
@@ -1258,7 +1351,76 @@ func (m *Model) moveSelected(delta int) {
 	m.rows[m.selected], m.rows[target] = m.rows[target], m.rows[m.selected]
 	m.selected = target
 	m.ensureSelectionVisible()
+	m.persistOrder()
+}
 
+// moveSelectedToEdge moves the selected row to the top or bottom of the
+// queue, keeping every other row's relative order. With a filter applied,
+// "top"/"bottom" is the first/last visible row: the moved row lands where
+// the eye expects, and hidden rows keep their slots.
+func (m *Model) moveSelectedToEdge(toTop bool) {
+	if m.opts.OnReorder == nil || len(m.rows) < 2 {
+		return
+	}
+	vis := m.visibleRows()
+	if visiblePos(vis, m.selected) < 0 {
+		return
+	}
+	edge := vis[0]
+	if !toTop {
+		edge = vis[len(vis)-1]
+	}
+	// Already at that edge: nothing to persist.
+	if edge == m.selected {
+		return
+	}
+
+	row := m.rows[m.selected]
+	rest := make([]*Row, 0, len(m.rows)-1)
+	rest = append(rest, m.rows[:m.selected]...)
+	rest = append(rest, m.rows[m.selected+1:]...)
+
+	// The edge's position in the list that no longer holds the moved row,
+	// then before it (top) or right after it (bottom).
+	target := edge
+	if target > m.selected {
+		target--
+	}
+	if !toTop {
+		target++
+	}
+
+	rows := make([]*Row, 0, len(m.rows))
+	rows = append(rows, rest[:target]...)
+	rows = append(rows, row)
+	rows = append(rows, rest[target:]...)
+	m.rows = rows
+	m.selected = target
+	m.ensureSelectionVisible()
+	m.persistOrder()
+}
+
+// retryAllFailed re-dispatches every failed row, so a run that lost a
+// network blip does not take one keypress per file. A filter does not
+// narrow it (start-all ignores the filter too): R means "fix everything
+// that broke".
+func (m *Model) retryAllFailed() {
+	if m.opts.OnControl == nil {
+		return
+	}
+	for _, r := range m.rows {
+		if r.Status == RowFailed {
+			m.opts.OnControl(r.ID, ControlRetry)
+		}
+	}
+}
+
+// persistOrder sends the current display order to the queue file and the
+// engine's flow priority.
+func (m *Model) persistOrder() {
+	if m.opts.OnReorder == nil {
+		return
+	}
 	ids := make([]int, len(m.rows))
 	for i, r := range m.rows {
 		ids[i] = r.ID
@@ -1470,7 +1632,9 @@ func (m Model) viewBottom() string {
 			b.WriteString(StyleDim.Render(status))
 		}
 	}
-	b.WriteString("\n" + truncateStyled(StyleDim.Render(m.pageHints()), m.contentWidth()))
+	for _, line := range wrapHint(m.pageHints(), m.contentWidth()) {
+		b.WriteString("\n" + StyleDim.Render(line))
+	}
 	if line := m.updateLine(); line != "" {
 		b.WriteString("\n" + line)
 	}
@@ -1520,7 +1684,7 @@ func (m Model) pageHints() string {
 			sKey = "s stop all"
 		}
 		return fmt.Sprintf(
-			"space start/pause · %s · r retry · x cancel · a add · / filter · d delete · J/K move · o edit",
+			"space start/pause · %s · r retry · R retry all · x cancel · a add · / filter · d delete · J/K g/G move",
 			sKey,
 		)
 	}
@@ -1970,6 +2134,7 @@ func (m Model) viewHelp() string {
 		"  space      start the selected file / pause it / back to held",
 		"  s          start all (flowing: " + fmt.Sprint(m.opts.Jobs) + " at a time) · press again to stop all",
 		"  r          retry the selected file (failed, paused or cancelled)",
+		"  R          retry every failed file (ignores the filter)",
 		"  x          cancel the selected file",
 		"  j/k        select (up/down scrolls the queue list)",
 		"",
@@ -1977,6 +2142,7 @@ func (m Model) viewHelp() string {
 		"  a          add URLs (paste several, whitespace separated; enter adds)",
 		"  d          delete the selected file from the queue",
 		"  J/K        move the selected file down/up (changes flow order)",
+		"  g/G        move the selected file to the top/bottom (also ctrl+↑/↓)",
 		"  o          edit the queue file in $EDITOR (settings tab: the config)",
 		"",
 		StyleDim.Render("board"),

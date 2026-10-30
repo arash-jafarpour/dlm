@@ -155,9 +155,11 @@ date, time, and file name.
 Keys are scoped per page, so a control never acts on another page's rows.
 
 - **Global**: `tab`/`←`/`→` switch tabs · `1`–`4` jump · `?` help ·
-  `u` install an offered update · `q` quit- **Downloads**: `space` start/pause · `s` start all / stop all ·
-  `r` retry · `x` cancel · `j`/`k` select and scroll · `a` add URLs ·
-  `d` delete (asks for confirmation) · `J`/`K` move down/up ·
+  `u` install an offered update · `q` quit
+- **Downloads**: `space` start/pause · `s` start all / stop all ·
+  `r` retry · `R` retry all failed · `x` cancel · `j`/`k` select and
+  scroll · `a` add URLs · `d` delete (asks for confirmation) ·
+  `J`/`K` move down/up · `g`/`G` move to top/bottom ·
   `o` edit the queue file · `/` filter the list
 - **Completed**: `j`/`k` scroll · `d` delete the selected entry ·
   `c` clear the history (both ask for confirmation) · `/` filter the list
@@ -172,6 +174,12 @@ own query. `enter` keeps the filter, `esc` clears it (with a filter applied,
 the footer totals, and the status line reads `filter "mkv" · 3 of 40`.
 Controls and `J`/`K` reordering act on the selected **visible** row, so
 filtering never changes the queue behind your back.
+
+`R` retries every failed file in one go, so a dropped connection costs one
+keypress instead of one per file (like `s`, it ignores the filter). `g`/`G`
+— or `ctrl+↑`/`ctrl+↓` — move the selected row straight to the top or bottom
+of the queue; like `J`/`K`, the new order is written to `queue.txt`
+immediately.
 
 Download values are validated exactly like `dlm config set`, and a change
 applies to the next file you start (no restart needed). Pausing cancels the

@@ -1740,3 +1740,184 @@ func TestBoardFilteredViewKeepsFrameHeight(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// R (retry all failed) and g/G (move to top/bottom)
+// ---------------------------------------------------------------------------
+
+func TestBoardRetryAllFailed(t *testing.T) {
+	var ids []int
+	var actions []ControlAction
+	m := NewModel(Options{
+		QueueURLs: []string{
+			"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv", "https://x/d.mkv",
+		},
+		Jobs: 2,
+		OnControl: func(id int, a ControlAction) {
+			ids = append(ids, id)
+			actions = append(actions, a)
+		},
+	})
+	m = update(m, JobStateMsg{ID: 1, State: RowFailed, Detail: "timeout"})
+	m = update(m, JobStateMsg{ID: 3, State: RowFailed, Detail: "reset"})
+	m = update(m, JobStateMsg{ID: 2, State: RowPaused})
+
+	// R retries both failures, not the paused file, whatever is selected.
+	m = press(m, "j", "R")
+	if fmt.Sprint(ids) != "[1 3]" {
+		t.Fatalf("retried ids = %v, want [1 3]", ids)
+	}
+	for _, a := range actions {
+		if a != ControlRetry {
+			t.Fatalf("action = %v, want ControlRetry", a)
+		}
+	}
+}
+
+func TestBoardRetryAllFailedIgnoresFilter(t *testing.T) {
+	var ids []int
+	m := NewModel(Options{
+		QueueURLs: []string{
+			"https://x/alpha.mkv", "https://x/beta.mkv", "https://x/gamma.mkv",
+		},
+		Jobs:      1,
+		OnControl: func(id int, _ ControlAction) { ids = append(ids, id) },
+	})
+	m = update(m, JobStateMsg{ID: 0, State: RowFailed})
+	m = update(m, JobStateMsg{ID: 2, State: RowFailed})
+
+	// Only alpha is visible under this filter; R is still "retry all".
+	m = press(m, "/", "a", "l", "p", "h", "a", "enter", "R")
+	if fmt.Sprint(ids) != "[0 2]" {
+		t.Fatalf("retried ids = %v, want [0 2]", ids)
+	}
+}
+
+func TestBoardRetryAllNoFailuresIsInert(t *testing.T) {
+	h := &boardHooks{}
+	_ = press(newHookedModel(h), "R")
+	if len(h.control) != 0 {
+		t.Fatalf("no failures must not issue controls: %+v", h.control)
+	}
+	// Page-scoped: other tabs ignore R entirely.
+	h2 := &boardHooks{}
+	_ = press(newHookedModel(h2), "2", "R")
+	if len(h2.control) != 0 {
+		t.Fatalf("R must be downloads-only: %+v", h2.control)
+	}
+}
+
+func TestBoardMoveSelectedToEdge(t *testing.T) {
+	var order []int
+	m := NewModel(Options{
+		QueueURLs: []string{
+			"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv",
+			"https://x/d.mkv", "https://x/e.mkv",
+		},
+		Jobs:      2,
+		OnReorder: func(ids []int) { order = append([]int(nil), ids...) },
+	})
+
+	// Selection starts at 0; move c to the bottom, then to the top.
+	m = press(m, "j", "j", "G")
+	if fmt.Sprint(order) != "[0 1 3 4 2]" {
+		t.Fatalf("bottom move = %v, want [0 1 3 4 2]", order)
+	}
+	if m.selected != 4 {
+		t.Fatalf("selection = %d, want 4", m.selected)
+	}
+
+	m = press(m, "g")
+	if fmt.Sprint(order) != "[2 0 1 3 4]" {
+		t.Fatalf("top move = %v, want [2 0 1 3 4]", order)
+	}
+	if m.selected != 0 {
+		t.Fatalf("selection = %d, want 0", m.selected)
+	}
+
+	// At the edge already: no redundant rewrite.
+	before := len(order)
+	_ = press(m, "g")
+	if len(order) != before {
+		t.Fatalf("g at the top must not rewrite the queue: %v", order)
+	}
+}
+
+func TestBoardMoveSelectedToEdgeCtrlArrows(t *testing.T) {
+	var order []int
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv"},
+		Jobs:      1,
+		OnReorder: func(ids []int) { order = append([]int(nil), ids...) },
+	})
+
+	m = update(m, tea.KeyMsg{Type: tea.KeyCtrlDown})
+	if fmt.Sprint(order) != "[1 2 0]" {
+		t.Fatalf("ctrl+down = %v, want [1 2 0]", order)
+	}
+	m = update(m, tea.KeyMsg{Type: tea.KeyCtrlUp})
+	if fmt.Sprint(order) != "[0 1 2]" {
+		t.Fatalf("ctrl+up = %v, want [0 1 2]", order)
+	}
+}
+
+func TestBoardMoveSelectedToEdgeSkipsHiddenRows(t *testing.T) {
+	var order []int
+	m := NewModel(Options{
+		QueueURLs: []string{
+			"https://x/keep-1.mkv",
+			"https://x/x-1.mkv",
+			"https://x/x-2.mkv",
+			"https://x/keep-2.mkv",
+			"https://x/x-3.mkv",
+		},
+		Jobs:      2,
+		OnReorder: func(ids []int) { order = append([]int(nil), ids...) },
+	})
+
+	// Filter to keep-1 (0) and keep-2 (3); G puts keep-1 after keep-2,
+	// leaving the hidden rows' order untouched.
+	m = press(m, "/", "k", "e", "e", "p", "enter", "G")
+	if fmt.Sprint(order) != "[1 2 3 0 4]" {
+		t.Fatalf("filtered bottom move = %v, want [1 2 3 0 4]", order)
+	}
+	if m.selected != 3 {
+		t.Fatalf("selection = %d, want 3", m.selected)
+	}
+
+	// g brings it back before the first visible row.
+	m = press(m, "g")
+	if fmt.Sprint(order) != "[1 2 0 3 4]" {
+		t.Fatalf("filtered top move = %v, want [1 2 0 3 4]", order)
+	}
+	if m.selected != 2 {
+		t.Fatalf("selection = %d, want 2", m.selected)
+	}
+}
+
+// TestBoardHintsWrapWithoutClipping: a narrow terminal wraps the key hints
+// instead of clipping keys off the right edge, and the frame keeps exactly
+// one terminal's height.
+func TestBoardHintsWrapWithoutClipping(t *testing.T) {
+	for _, w := range []int{64, 80, 100} {
+		for _, h := range []int{12, 16, 24} {
+			m := NewModel(Options{
+				QueueURLs: []string{"https://x/a.mkv"},
+				Jobs:      1,
+				Version:   "0.7.0",
+			})
+			m = update(m, tea.WindowSizeMsg{Width: w, Height: h})
+			view := m.View()
+			plain := stripANSI(view)
+
+			for _, want := range []string{"/ filter", "d delete", "J/K g/G move"} {
+				if !strings.Contains(plain, want) {
+					t.Errorf("width %d height %d: hint %q missing or clipped:\n%s", w, h, want, plain)
+				}
+			}
+			if lines := len(strings.Split(view, "\n")); lines != h {
+				t.Errorf("width %d height %d: view is %d lines, want %d:\n%s", w, h, lines, h, plain)
+			}
+		}
+	}
+}
