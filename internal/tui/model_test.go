@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -2406,5 +2407,88 @@ func TestBoardMouseClickEditsSetting(t *testing.T) {
 	if m.inputActive || m.selSettings != sel {
 		t.Fatalf("clicking a note must do nothing: active=%v selection=%d→%d",
 			m.inputActive, sel, m.selSettings)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Run clock
+// ---------------------------------------------------------------------------
+
+func TestRunClockText(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "00:00"},
+		{9 * time.Second, "00:09"},
+		{65 * time.Second, "01:05"},
+		{59*time.Minute + 59*time.Second, "59:59"},
+		{time.Hour + 2*time.Minute + 5*time.Second, "1:02:05"},
+	}
+	for _, c := range cases {
+		if got := runClockText(c.d); got != c.want {
+			t.Errorf("runClockText(%s) = %q, want %q", c.d, got, c.want)
+		}
+	}
+}
+
+func TestBoardRunClockStartsAndFreezes(t *testing.T) {
+	m := newTestModel()
+	if m.runClock() != 0 {
+		t.Fatalf("nothing has run yet, clock = %s", m.runClock())
+	}
+
+	row := newRow(0, "a.mkv", 10, 0)
+	m = update(m, FileStartedMsg{ID: 0, Row: row})
+	if m.runStart.IsZero() {
+		t.Fatal("the clock must start with the first file")
+	}
+	if !regexp.MustCompile(`running 1/2 files · \d{2}:\d{2} · 0 saved, 0 failed`).MatchString(stripANSI(m.View())) {
+		t.Fatalf("running footer must show the clock:\n%s", m.View())
+	}
+
+	// Finishing the run freezes the total and keeps it in the footer.
+	m = update(m, RunFinishedMsg{})
+	if !m.runStart.IsZero() {
+		t.Fatal("the clock must stop when the run finishes")
+	}
+	if m.runElapsed <= 0 {
+		t.Fatalf("frozen total = %s, want > 0", m.runElapsed)
+	}
+	if !strings.Contains(stripANSI(m.View()), "run finished — 0 saved, 0 failed · "+runClockText(m.runElapsed)) {
+		t.Fatalf("finished footer must show the total:\n%s", m.View())
+	}
+
+	// A new run times from zero again.
+	row2 := newRow(1, "b.mkv", 10, 0)
+	m = update(m, FileStartedMsg{ID: 1, Row: row2})
+	if m.runStart.IsZero() || m.runElapsed != 0 {
+		t.Fatalf("a new run must reset the clock: start=%v elapsed=%s", m.runStart, m.runElapsed)
+	}
+}
+
+func TestBoardRunClockStartsOnStartingState(t *testing.T) {
+	m := newTestModel()
+	m = update(m, JobStateMsg{ID: 0, State: RowStarting})
+	if m.runStart.IsZero() {
+		t.Fatal("a dispatching file must start the clock too")
+	}
+}
+
+func TestBoardStopAllResetsRunClock(t *testing.T) {
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv"},
+		Jobs:      1,
+		OnControl: func(int, ControlAction) {},
+	})
+	row := newRow(0, "a.mkv", 10, 0)
+	m = update(m, FileStartedMsg{ID: 0, Row: row})
+
+	m = press(m, "s") // active → stop all
+	if !m.runStart.IsZero() || m.runElapsed != 0 {
+		t.Fatalf("stop-all must drop the clock: start=%v elapsed=%s", m.runStart, m.runElapsed)
+	}
+	if strings.Contains(stripANSI(m.View()), "run finished") {
+		t.Fatalf("stop-all is not a finished run:\n%s", m.View())
 	}
 }

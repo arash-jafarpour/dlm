@@ -265,6 +265,12 @@ type Model struct {
 	lastTotal  int64
 	hist       []float64
 
+	// Run clock: runStart is set when the first file goes active and cleared
+	// when the run settles, which freezes the total into runElapsed until
+	// the next run starts.
+	runStart   time.Time
+	runElapsed time.Duration
+
 	width  int
 	height int
 }
@@ -566,6 +572,47 @@ func restoreMouseTracking() tea.Cmd {
 	return func() tea.Msg { return tea.EnableMouseCellMotion() }
 }
 
+// markRunActive starts the run clock the first time a file goes active, and
+// clears the previous run's frozen total so a new run times from zero.
+func (m *Model) markRunActive() {
+	if !m.runStart.IsZero() {
+		return
+	}
+	m.runStart = time.Now()
+	m.runElapsed = 0
+}
+
+// freezeRunClock stops the run clock and keeps its total for the finished
+// footer. A run that never went active leaves both fields zero.
+func (m *Model) freezeRunClock() {
+	if m.runStart.IsZero() {
+		return
+	}
+	m.runElapsed = time.Since(m.runStart)
+	m.runStart = time.Time{}
+}
+
+// runClock is the elapsed wall-clock time of the current run, or the frozen
+// total of the last one. Zero before anything has run.
+func (m Model) runClock() time.Duration {
+	if !m.runStart.IsZero() {
+		return time.Since(m.runStart)
+	}
+	return m.runElapsed
+}
+
+// runClockText renders a run duration as MM:SS, or H:MM:SS past an hour.
+func runClockText(d time.Duration) string {
+	secs := int(d / time.Second)
+	if secs < 0 {
+		secs = 0
+	}
+	if secs < 3600 {
+		return fmt.Sprintf("%02d:%02d", secs/60, secs%60)
+	}
+	return fmt.Sprintf("%d:%02d:%02d", secs/3600, (secs/60)%60, secs%60)
+}
+
 // checkUpdate starts the background release check, if cmd wired one.
 func (m Model) checkUpdate() tea.Cmd {
 	if m.opts.OnCheckUpdate == nil {
@@ -589,6 +636,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A live transfer (re)opens the run: retries after a finished
 		// summary must flip the footer back to running.
 		m.runFinished = false
+		m.markRunActive()
 		if row := m.rowByID(msg.ID); row != nil {
 			// The queued slot adopts the live row so byte updates land in
 			// the right place, position preserved.
@@ -615,6 +663,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		row.Status = msg.State
 		row.Detail = msg.Detail
+		if msg.State == RowStarting || msg.State == RowRunning {
+			m.markRunActive()
+		}
 		return m, nil
 
 	case WarnMsg:
@@ -626,6 +677,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case RunFinishedMsg:
 		m.runFinished = true
+		m.freezeRunClock()
 		// A run that actually settled something gets one bell: it is the
 		// "your batch is done" signal when the board is not being watched.
 		cmd := m.refreshSummary()
@@ -836,6 +888,9 @@ func (m *Model) handleDownloadsKey(msg tea.KeyMsg) tea.Cmd {
 			// starts everything.
 			if m.activeCount() > 0 {
 				m.opts.OnControl(-1, ControlStopAll)
+				// Nothing is in flight any more: drop the clock instead of
+				// leaving a timer ticking against an idle board.
+				m.runStart, m.runElapsed = time.Time{}, 0
 			} else {
 				m.opts.OnControl(-1, ControlStartAll)
 			}
@@ -1864,6 +1919,9 @@ func (m Model) viewBottom() string {
 		switch {
 		case m.finished():
 			summary := fmt.Sprintf("run finished — %d saved, %d failed", saved, failed)
+			if elapsed := m.runClock(); elapsed > 0 {
+				summary += " · " + runClockText(elapsed)
+			}
 			if failed > 0 {
 				b.WriteString(StyleErr.Render(summary))
 			} else {
@@ -1878,10 +1936,11 @@ func (m Model) viewBottom() string {
 				m.waitingCount(), m.opts.Jobs,
 			)))
 		default:
-			status := fmt.Sprintf(
-				"running %d/%d files · %d saved, %d failed",
-				m.runningCount(), len(m.rows), saved, failed,
-			)
+			status := fmt.Sprintf("running %d/%d files", m.runningCount(), len(m.rows))
+			if elapsed := m.runClock(); elapsed > 0 {
+				status += " · " + runClockText(elapsed)
+			}
+			status += fmt.Sprintf(" · %d saved, %d failed", saved, failed)
 			if speed := m.currentSpeed(); speed > 0 {
 				status += fmt.Sprintf(" · %s/s %s", humanBytes(int64(speed)), sparkline(m.hist))
 			}

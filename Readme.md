@@ -204,10 +204,12 @@ downloads or the completed page. The board creates the folder first, so a
 fresh install opens an empty one instead of failing.
 
 The completed tab lists date, time, file name, size, and duration for every
-finished download. While transfers run, the footer shows the aggregate
-speed with a small sparkline. When the first run settles, the board rings
-the terminal bell once — success or failures alike — so you do not have to
-watch the screen to know it is done (a muted terminal simply stays quiet).
+finished download. While transfers run, the footer shows the elapsed run
+time (`04:12`), the aggregate speed and a small sparkline; when the run
+settles the clock freezes on its total. When the first run settles, the
+board rings the terminal bell once — success or failures alike — so you do
+not have to watch the screen to know it is done (a muted terminal simply
+stays quiet).
 
 The board checks GitHub for a newer release in the background when it
 starts. If one exists, the footer offers it right above the running version
