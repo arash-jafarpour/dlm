@@ -9,6 +9,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 func newTestModel() Model {
@@ -2490,5 +2492,38 @@ func TestBoardStopAllResetsRunClock(t *testing.T) {
 	}
 	if strings.Contains(stripANSI(m.View()), "run finished") {
 		t.Fatalf("stop-all is not a finished run:\n%s", m.View())
+	}
+}
+
+// TestBoardUpdateNoticeIsHighlighted: the release notice carries its own
+// styling — not the dim text the hints/footer use — so it stands out. The
+// color profile is forced because test output is not a terminal.
+func TestBoardUpdateNoticeIsHighlighted(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	m := newTestModel()
+	m = update(m, UpdateAvailableMsg{Version: "9.9.9"})
+	notice := m.updateLine()
+
+	if !strings.Contains(notice, "\x1b[") {
+		t.Fatalf("the notice must carry ANSI styling: %q", notice)
+	}
+	if notice == StyleDim.Render(stripANSI(notice)) {
+		t.Fatalf("the notice must not use the dim footer style: %q", notice)
+	}
+	if !strings.Contains(stripANSI(notice), "↑ v9.9.9 is available · u update") {
+		t.Fatalf("notice text = %q", stripANSI(notice))
+	}
+
+	// The installed reminder belongs to the same notice family.
+	m = update(m, UpdateInstalledMsg{Version: "9.9.9"})
+	installed := m.updateLine()
+	if installed == StyleDim.Render(stripANSI(installed)) {
+		t.Fatalf("the restart reminder must not be dim: %q", installed)
+	}
+	if !strings.Contains(stripANSI(installed), "✓ dlm v9.9.9 installed") {
+		t.Fatalf("installed text = %q", stripANSI(installed))
 	}
 }

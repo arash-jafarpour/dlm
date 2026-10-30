@@ -212,8 +212,9 @@ not have to watch the screen to know it is done (a muted terminal simply
 stays quiet).
 
 The board checks GitHub for a newer release in the background when it
-starts. If one exists, the footer offers it right above the running version
-(`v0.7.0 is available · u update`). `u` asks for confirmation first, then
+starts. If one exists, a highlighted line above the footer offers it
+(`↑ v0.7.0 is available · u update`), styled apart from the dim status and
+hint text so it is hard to miss. `u` asks for confirmation first, then
 downloads the release, verifies its SHA256, swaps the binary, and leaves a
 `restart dlm to use it` reminder on the footer. The check is silent on
 development builds and when the network or rate limit says no.

@@ -1971,15 +1971,16 @@ func (m Model) updateLineShown() bool {
 
 // updateLine is the standalone notice between the key hints and the footer:
 // the offered release with its shortcut, the running install, or the restart
-// reminder after success.
+// reminder after success. It uses its own bright style rather than the dim
+// footer styling, so an available update is impossible to miss.
 func (m Model) updateLine() string {
 	switch {
 	case m.updating:
-		return StyleWarn.Render(spinnerFrame(m.spin) + " updating dlm to v" + m.updateAvailable + "…")
+		return StyleUpdate.Render(spinnerFrame(m.spin) + " updating dlm to v" + m.updateAvailable + "…")
 	case m.updatedTo != "":
-		return StyleOK.Render("dlm v" + m.updatedTo + " installed · restart dlm to use it · q quit")
+		return StyleUpdate.Render("✓ dlm v" + m.updatedTo + " installed · restart dlm to use it · q quit")
 	case m.updateAvailable != "":
-		return StyleWarn.Render("v" + m.updateAvailable + " is available · u update")
+		return StyleUpdate.Render("↑ v" + m.updateAvailable + " is available · u update")
 	}
 	return ""
 }
