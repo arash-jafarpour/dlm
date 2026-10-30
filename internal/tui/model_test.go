@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -2177,5 +2178,75 @@ func TestBoardOpenFolderWithoutHookIsInert(t *testing.T) {
 	m := newTestModel() // no OnOpenDir
 	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}}); cmd != nil {
 		t.Fatal("O without a hook must not return a command")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Terminal bell
+// ---------------------------------------------------------------------------
+
+func captureBell(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	old := bellOut
+	bellOut = buf
+	t.Cleanup(func() { bellOut = old })
+	return buf
+}
+
+// runCmd executes a command and flattens a tea.Batch.
+func runCmd(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	if batch, ok := cmd().(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c != nil {
+				c()
+			}
+		}
+	}
+}
+
+func TestBoardBellsWhenRunFinishes(t *testing.T) {
+	buf := captureBell(t)
+	m := newTestModel()
+
+	row := newRow(0, "a.mkv", 10, 0)
+	m = update(m, FileStartedMsg{ID: 0, Row: row})
+	m = update(m, FileDoneMsg{Row: row, Text: "✓ saved → /tmp/a.mkv"})
+
+	_, cmd := m.Update(RunFinishedMsg{})
+	if cmd == nil {
+		t.Fatal("a settled run must return the bell command")
+	}
+	runCmd(cmd)
+	if got := buf.String(); got != "\a" {
+		t.Fatalf("bell bytes = %q, want one BEL", got)
+	}
+}
+
+func TestBoardBellsWhenRunFinishesWithFailures(t *testing.T) {
+	buf := captureBell(t)
+	m := newTestModel()
+	m = update(m, JobStateMsg{ID: 0, State: RowFailed, Detail: "timeout"})
+
+	_, cmd := m.Update(RunFinishedMsg{})
+	runCmd(cmd)
+	if got := buf.String(); got != "\a" {
+		t.Fatalf("a failed run must still ring once, got %q", got)
+	}
+}
+
+func TestBoardNoBellWithoutASettledRun(t *testing.T) {
+	buf := captureBell(t)
+	m := newTestModel() // every row is still held
+
+	_, cmd := m.Update(RunFinishedMsg{})
+	if cmd != nil {
+		t.Fatalf("nothing settled: no command expected, got %v", cmd)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("nothing settled: no bell expected, got %q", buf.String())
 	}
 }

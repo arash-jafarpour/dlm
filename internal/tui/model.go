@@ -6,6 +6,8 @@ package tui
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -541,6 +543,18 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
+// bellOut receives the BEL byte; tests swap it to capture the ring.
+var bellOut io.Writer = os.Stderr
+
+// bellCmd rings the terminal bell. BEL prints nothing, so it cannot disturb
+// the frame, and stderr keeps it out of bubbletea's render stream.
+func bellCmd() tea.Cmd {
+	return func() tea.Msg {
+		fmt.Fprint(bellOut, "\a")
+		return nil
+	}
+}
+
 // checkUpdate starts the background release check, if cmd wired one.
 func (m Model) checkUpdate() tea.Cmd {
 	if m.opts.OnCheckUpdate == nil {
@@ -601,8 +615,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case RunFinishedMsg:
 		m.runFinished = true
-		// A finished run changes the totals the completed tab shows.
-		return m, m.refreshSummary()
+		// A run that actually settled something gets one bell: it is the
+		// "your batch is done" signal when the board is not being watched.
+		cmd := m.refreshSummary()
+		if saved, failed := m.counts(); saved+failed > 0 {
+			cmd = tea.Batch(cmd, bellCmd())
+		}
+		return m, cmd
 
 	case QueueReloadMsg:
 		m.applyReload(msg.Jobs)
