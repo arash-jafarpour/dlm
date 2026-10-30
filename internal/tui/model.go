@@ -558,7 +558,7 @@ var bellOut io.Writer = os.Stderr
 // the frame, and stderr keeps it out of bubbletea's render stream.
 func bellCmd() tea.Cmd {
 	return func() tea.Msg {
-		fmt.Fprint(bellOut, "\a")
+		_, _ = fmt.Fprint(bellOut, "\a")
 		return nil
 	}
 }
@@ -1951,7 +1951,9 @@ func (m Model) viewBottom() string {
 		b.WriteString("\n" + StyleDim.Render(line))
 	}
 	if line := m.updateLine(); line != "" {
-		b.WriteString("\n" + line)
+		// Right-aligned so the notice sits directly above the version at
+		// the end of the footer line.
+		b.WriteString("\n" + alignRight(line, m.width))
 	}
 	footer := StyleDim.Render("tab switch · 1-4 tabs · ? help · q quit")
 	if m.opts.Version != "" {
@@ -2171,7 +2173,7 @@ func (m Model) viewCompleted() string {
 	vis := m.visibleHistory()
 	if len(vis) == 0 {
 		if q := m.filters[TabCompleted].query; q != "" {
-			b.WriteString(fmt.Sprintf("%s %q\n", StyleDim.Render("no entries match"), q))
+			fmt.Fprintf(&b, "%s %q\n", StyleDim.Render("no entries match"), q)
 			b.WriteString(StyleDim.Render("esc clears the filter · / edits it") + "\n")
 			if s.Dir != "" {
 				b.WriteString(m.outputLine())
@@ -2530,6 +2532,16 @@ func padBetween(left, right string, width int) string {
 		gap = 1
 	}
 	return left + strings.Repeat(" ", gap) + right
+}
+
+// alignRight pads a one-line notice with leading spaces so it ends at the
+// frame's right edge — directly above the version in the footer.
+func alignRight(line string, width int) string {
+	gap := width - lipglossWidth(line)
+	if gap < 0 {
+		gap = 0
+	}
+	return strings.Repeat(" ", gap) + line
 }
 
 // padLines appends blank lines so frame fills height rows. For frames without

@@ -19,11 +19,10 @@ var (
 	StyleTabActive   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
 	StyleTabInactive = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	StyleStarting    = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	// StyleUpdate highlights the release notice above the footer: bold and
-	// bright, so it cannot be mistaken for the dim status/hint/footer text
-	// it sits between. The color adapts to light terminals.
-	StyleUpdate = lipgloss.NewStyle().Bold(true).
-			Foreground(lipgloss.AdaptiveColor{Light: "127", Dark: "213"})
+	// StyleUpdate highlights the release notice above the version: bold, in
+	// the same blue as the other board highlights, so it cannot be mistaken
+	// for the dim status/hint/footer text it sits between.
+	StyleUpdate = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
 )
 
 // renderRow draws one live progress line, shaped like the plain-CLI rows so

@@ -1609,7 +1609,7 @@ func TestBoardFilterControlTargetsVisibleRow(t *testing.T) {
 		OnControl: func(id int, a ControlAction) { gotID, gotAction = id, a },
 	})
 
-	m = press(m, "/", "b", "enter", " ")
+	_ = press(m, "/", "b", "enter", " ")
 	if gotID != 1 || gotAction != ControlStart {
 		t.Fatalf("space hit id=%d action=%v, want start on job 1", gotID, gotAction)
 	}
@@ -1767,7 +1767,7 @@ func TestBoardRetryAllFailed(t *testing.T) {
 	m = update(m, JobStateMsg{ID: 2, State: RowPaused})
 
 	// R retries both failures, not the paused file, whatever is selected.
-	m = press(m, "j", "R")
+	_ = press(m, "j", "R")
 	if fmt.Sprint(ids) != "[1 3]" {
 		t.Fatalf("retried ids = %v, want [1 3]", ids)
 	}
@@ -1791,7 +1791,7 @@ func TestBoardRetryAllFailedIgnoresFilter(t *testing.T) {
 	m = update(m, JobStateMsg{ID: 2, State: RowFailed})
 
 	// Only alpha is visible under this filter; R is still "retry all".
-	m = press(m, "/", "a", "l", "p", "h", "a", "enter", "R")
+	_ = press(m, "/", "a", "l", "p", "h", "a", "enter", "R")
 	if fmt.Sprint(ids) != "[0 2]" {
 		t.Fatalf("retried ids = %v, want [0 2]", ids)
 	}
@@ -1859,7 +1859,7 @@ func TestBoardMoveSelectedToEdgeCtrlArrows(t *testing.T) {
 	if fmt.Sprint(order) != "[1 2 0]" {
 		t.Fatalf("ctrl+down = %v, want [1 2 0]", order)
 	}
-	m = update(m, tea.KeyMsg{Type: tea.KeyCtrlUp})
+	_ = update(m, tea.KeyMsg{Type: tea.KeyCtrlUp})
 	if fmt.Sprint(order) != "[0 1 2]" {
 		t.Fatalf("ctrl+up = %v, want [0 1 2]", order)
 	}
@@ -2171,7 +2171,7 @@ func TestBoardOpenFolderKey(t *testing.T) {
 	}
 
 	// Other pages have no folder action.
-	m = press(m, "3", "O", "4", "O")
+	_ = press(m, "3", "O", "4", "O")
 	if hookCalls != 2 {
 		t.Fatalf("settings/summary must ignore O, calls=%d", hookCalls)
 	}
@@ -2322,7 +2322,7 @@ func TestBoardMouseClickOnCompletedDoesNotToggle(t *testing.T) {
 	})
 	m = press(m, "2")
 	y, x := lineWith(t, m, "a.mkv")
-	m = update(m, mouseClick(y, x))
+	_ = update(m, mouseClick(y, x))
 	if controls != 0 {
 		t.Fatalf("completed clicks must not start or stop anything: %d controls", controls)
 	}
@@ -2516,6 +2516,10 @@ func TestBoardUpdateNoticeIsHighlighted(t *testing.T) {
 	if !strings.Contains(stripANSI(notice), "↑ v9.9.9 is available · u update") {
 		t.Fatalf("notice text = %q", stripANSI(notice))
 	}
+	// Same blue as the board's other highlights (the active tab).
+	if StyleUpdate.Render("x") != StyleTabActive.Render("x") {
+		t.Fatal("the notice must use the tab-highlight blue")
+	}
 
 	// The installed reminder belongs to the same notice family.
 	m = update(m, UpdateInstalledMsg{Version: "9.9.9"})
@@ -2525,5 +2529,37 @@ func TestBoardUpdateNoticeIsHighlighted(t *testing.T) {
 	}
 	if !strings.Contains(stripANSI(installed), "✓ dlm v9.9.9 installed") {
 		t.Fatalf("installed text = %q", stripANSI(installed))
+	}
+}
+
+// TestBoardUpdateNoticeSitsAboveTheVersion: the notice is right-aligned so it
+// ends directly above the version at the end of the footer line.
+func TestBoardUpdateNoticeSitsAboveTheVersion(t *testing.T) {
+	const width = 90
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv"},
+		Jobs:      1,
+		Version:   "0.6.0",
+	})
+	m = update(m, tea.WindowSizeMsg{Width: width, Height: 20})
+	m = update(m, UpdateAvailableMsg{Version: "0.7.0"})
+
+	lines := strings.Split(stripANSI(m.View()), "\n")
+	notice, footer := lines[len(lines)-2], lines[len(lines)-1]
+
+	if got := lipglossWidth(notice); got != width {
+		t.Fatalf("notice line is %d cells wide, want %d (right-aligned):\n%s", got, width, notice)
+	}
+	if got := lipglossWidth(footer); got != width {
+		t.Fatalf("footer line is %d cells wide, want %d:\n%s", got, width, footer)
+	}
+	if !strings.HasPrefix(notice, " ") {
+		t.Fatalf("the notice must be padded from the left:\n%q", notice)
+	}
+	if !strings.HasSuffix(notice, "↑ v0.7.0 is available · u update") {
+		t.Fatalf("notice must end at the row's right edge:\n%q", notice)
+	}
+	if !strings.HasSuffix(footer, "dlm 0.6.0") {
+		t.Fatalf("version must stay at the end of the footer:\n%q", footer)
 	}
 }
