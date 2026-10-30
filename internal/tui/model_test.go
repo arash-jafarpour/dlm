@@ -2250,3 +2250,77 @@ func TestBoardNoBellWithoutASettledRun(t *testing.T) {
 		t.Fatalf("nothing settled: no bell expected, got %q", buf.String())
 	}
 }
+
+// TestBoardMouseClickTogglesDownload: a click on a downloads row is the
+// mouse's space — start a held file, stop a running one, resume, retry — and
+// a click on a saved row does nothing.
+func TestBoardMouseClickTogglesDownload(t *testing.T) {
+	var ids []int
+	var actions []ControlAction
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv"},
+		Jobs:      2,
+		OnControl: func(id int, a ControlAction) {
+			ids = append(ids, id)
+			actions = append(actions, a)
+		},
+	})
+
+	y, x := lineWith(t, m, "b.mkv")
+	click := func() {
+		m = update(m, mouseClick(y, x))
+	}
+
+	// Held → start.
+	click()
+	if m.selected != 1 || fmt.Sprint(ids) != "[1]" || actions[0] != ControlStart {
+		t.Fatalf("held click: selected=%d ids=%v actions=%v", m.selected, ids, actions)
+	}
+
+	// Running → stop (the same click again).
+	m = update(m, JobStateMsg{ID: 1, State: RowRunning})
+	click()
+	if len(actions) != 2 || actions[1] != ControlPause || ids[1] != 1 {
+		t.Fatalf("running click must pause: ids=%v actions=%v", ids, actions)
+	}
+
+	// Paused → resume.
+	m = update(m, JobStateMsg{ID: 1, State: RowPaused})
+	click()
+	if len(actions) != 3 || actions[2] != ControlResume {
+		t.Fatalf("paused click must resume: %v", actions)
+	}
+
+	// Failed → retry.
+	m = update(m, JobStateMsg{ID: 1, State: RowFailed, Detail: "timeout"})
+	click()
+	if len(actions) != 4 || actions[3] != ControlRetry {
+		t.Fatalf("failed click must retry: %v", actions)
+	}
+
+	// Saved → nothing to start or stop.
+	m = update(m, JobStateMsg{ID: 1, State: RowSaved})
+	click()
+	if len(actions) != 4 {
+		t.Fatalf("a saved row must not issue a control: %v", actions)
+	}
+	if m.selected != 1 {
+		t.Fatalf("a saved row click still selects it, got %d", m.selected)
+	}
+}
+
+func TestBoardMouseClickOnCompletedDoesNotToggle(t *testing.T) {
+	var controls int
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv"},
+		Completed: []HistoryEntry{{Text: "2026-10-15 10:00:00  a.mkv", Ref: "raw-a"}},
+		Jobs:      1,
+		OnControl: func(int, ControlAction) { controls++ },
+	})
+	m = press(m, "2")
+	y, x := lineWith(t, m, "a.mkv")
+	m = update(m, mouseClick(y, x))
+	if controls != 0 {
+		t.Fatalf("completed clicks must not start or stop anything: %d controls", controls)
+	}
+}

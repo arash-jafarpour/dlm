@@ -806,22 +806,7 @@ func (m *Model) handleDownloadsKey(msg tea.KeyMsg) tea.Cmd {
 			return m.opts.OnOpenDir()
 		}
 	case " ":
-		m.controlSelected(func(row *Row) ControlAction {
-			switch row.Status {
-			case RowPaused:
-				return ControlResume
-			case RowQueued, RowStarting:
-				// Held → start it; already starting → back to held.
-				if row.Status == RowQueued {
-					return ControlStart
-				}
-				return ControlPause
-			case RowFailed, RowCancelled:
-				return ControlRetry
-			default:
-				return ControlPause
-			}
-		})
+		m.toggleSelected()
 	case "s":
 		if m.opts.OnControl != nil {
 			// Toggle: with anything active, s stops the whole run and
@@ -1086,6 +1071,8 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case TabDownloads:
 		m.selected = idx
 		m.ensureSelectionVisible()
+		// A click is the mouse's space: start the file, or stop it again.
+		m.toggleSelected()
 	case TabCompleted:
 		m.selCompleted = idx
 		m.ensureHistoryVisible()
@@ -1674,20 +1661,49 @@ func (m *Model) ensureSelectionVisible() {
 	m.scrollOffset = clampInt(m.scrollOffset, 0, maxInt(0, len(vis)-window))
 }
 
-func (m *Model) controlSelected(action func(row *Row) ControlAction) {
-	if m.opts.OnControl == nil || len(m.rows) == 0 {
-		return
+// selectedRow returns the selected row when it passes the filter. A filter
+// with no matches leaves no row to act on: never touch a row the user cannot
+// see.
+func (m Model) selectedRow() (*Row, bool) {
+	if len(m.rows) == 0 || m.selected < 0 || m.selected >= len(m.rows) {
+		return nil, false
 	}
-	if m.selected >= len(m.rows) {
-		m.selected = len(m.rows) - 1
-	}
-	// A filter with no matches leaves no row to act on: never touch a row
-	// the user cannot see.
 	if visiblePos(m.visibleRows(), m.selected) < 0 {
+		return nil, false
+	}
+	return m.rows[m.selected], true
+}
+
+func (m *Model) controlSelected(action func(row *Row) ControlAction) {
+	row, ok := m.selectedRow()
+	if !ok || m.opts.OnControl == nil {
 		return
 	}
-	row := m.rows[m.selected]
 	m.opts.OnControl(row.ID, action(row))
+}
+
+// toggleSelected is the space/click action: start a held file, pause a
+// transfer (including one still starting), resume a paused one, retry a
+// failed or cancelled one. A saved row has nothing to start or stop.
+func (m *Model) toggleSelected() {
+	row, ok := m.selectedRow()
+	if !ok || m.opts.OnControl == nil {
+		return
+	}
+	var action ControlAction
+	switch row.Status {
+	case RowPaused:
+		action = ControlResume
+	case RowQueued:
+		action = ControlStart
+	case RowFailed, RowCancelled:
+		action = ControlRetry
+	case RowRunning, RowStarting:
+		action = ControlPause
+	default: // RowSaved
+		return
+	}
+	m.opts.OnControl(row.ID, action)
 }
 
 func (m Model) rowByID(id int) *Row {
@@ -2345,7 +2361,7 @@ func (m Model) viewHelp() string {
 		"",
 		StyleDim.Render("board"),
 		"  1-4, tab   downloads / completed / settings / summary",
-		"  mouse      click a tab or row · wheel scrolls the current list",
+		"  mouse      click a tab · click a download to start/stop it · wheel scrolls",
 		"  O          open the downloads folder in your file manager",
 		"  ?          this help · q quit (the run stops, parts resume later)",
 		"",
