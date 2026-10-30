@@ -155,17 +155,23 @@ date, time, and file name.
 Keys are scoped per page, so a control never acts on another page's rows.
 
 - **Global**: `tab`/`←`/`→` switch tabs · `1`–`4` jump · `?` help ·
-  `u` install an offered update · `q` quit
-- **Downloads**: `space` start/pause · `s` start all / stop all ·
+  `u` install an offered update · `q` quit- **Downloads**: `space` start/pause · `s` start all / stop all ·
   `r` retry · `x` cancel · `j`/`k` select and scroll · `a` add URLs ·
   `d` delete (asks for confirmation) · `J`/`K` move down/up ·
-  `o` edit the queue file
+  `o` edit the queue file · `/` filter the list
 - **Completed**: `j`/`k` scroll · `d` delete the selected entry ·
-  `c` clear the history (both ask for confirmation)
+  `c` clear the history (both ask for confirmation) · `/` filter the list
 - **Settings**: `j`/`k` select · `enter` edit (or `space` to toggle a
   boolean) · `r` reset that value to its default · `R` reset everything ·
   `o` edit `config.json` by hand — resets ask for confirmation first
 - **Summary**: `r` refresh the queue/completed/downloads totals
+
+`/` narrows the downloads or completed list as you type; each page keeps its
+own query. `enter` keeps the filter, `esc` clears it (with a filter applied,
+`esc` clears before it quits; `q` always quits). Hidden rows still count in
+the footer totals, and the status line reads `filter "mkv" · 3 of 40`.
+Controls and `J`/`K` reordering act on the selected **visible** row, so
+filtering never changes the queue behind your back.
 
 Download values are validated exactly like `dlm config set`, and a change
 applies to the next file you start (no restart needed). Pausing cancels the

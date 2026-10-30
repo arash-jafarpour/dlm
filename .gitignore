@@ -18,3 +18,6 @@ dist/
 
 # Leak artifacts from null-ls/none-ls formatter temp files (goimports-reviser)
 **/.null-ls_*
+
+# Local working notes (release planning)
+plan.md

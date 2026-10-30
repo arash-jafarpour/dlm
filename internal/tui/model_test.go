@@ -1472,3 +1472,271 @@ func TestBoardRowSpeedAndETA(t *testing.T) {
 		t.Errorf("unknown-size row broken: %s", line)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// '/' filter
+// ---------------------------------------------------------------------------
+
+func newFilterModel() Model {
+	return NewModel(Options{
+		QueueURLs: []string{
+			"https://x/alpha-1.mkv",
+			"https://x/beta.mkv",
+			"https://x/alpha-2.mkv",
+			"https://x/gamma.zip",
+			"https://x/alpha-3.mkv",
+		},
+		Jobs: 2,
+	})
+}
+
+func TestBoardFilterNarrowsDownloads(t *testing.T) {
+	m := press(newFilterModel(), "/", "a", "l", "p", "h", "a", "enter")
+
+	view := m.View()
+	for _, want := range []string{"alpha-1.mkv", "alpha-2.mkv", "alpha-3.mkv", `filter "alpha" · 3 of 5`} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("%q missing from filtered view:\n%s", want, view)
+		}
+	}
+	for _, hidden := range []string{"beta.mkv", "gamma.zip"} {
+		if strings.Contains(view, hidden) {
+			t.Fatalf("filtered-out row %q still rendered:\n%s", hidden, view)
+		}
+	}
+
+	// j/k cycle only through matches: 0 -> 2 -> 4 -> wrap.
+	for _, want := range []int{2, 4, 0} {
+		m = press(m, "j")
+		if m.selected != want {
+			t.Fatalf("selection = %d, want %d (matches only)", m.selected, want)
+		}
+	}
+	m = press(m, "k")
+	if m.selected != 4 {
+		t.Fatalf("k must wrap to the last match, got %d", m.selected)
+	}
+}
+
+func TestBoardFilterEnterKeepsEscClearsThenQuits(t *testing.T) {
+	m := press(newFilterModel(), "/", "b", "e", "t", "a")
+	if f := m.filters[TabDownloads]; !f.open || f.query != "beta" {
+		t.Fatalf("typing must narrow live: %+v", f)
+	}
+
+	m = press(m, "enter")
+	if f := m.filters[TabDownloads]; f.open || f.query != "beta" {
+		t.Fatalf("enter keeps the query and closes the prompt: %+v", f)
+	}
+	if !strings.Contains(m.View(), `filter "beta" · 1 of 5`) {
+		t.Fatalf("applied filter missing from status:\n%s", m.View())
+	}
+
+	// esc clears the filter instead of quitting; the next esc quits.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if cmd != nil {
+		t.Fatal("esc must clear the filter before it quits")
+	}
+	if f := m.filters[TabDownloads]; f.query != "" {
+		t.Fatalf("esc must clear the query: %+v", f)
+	}
+	if strings.Contains(m.View(), `filter "`) {
+		t.Fatalf("status must drop the cleared filter:\n%s", m.View())
+	}
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc}); cmd == nil {
+		t.Fatal("esc with no filter must quit")
+	}
+}
+
+func TestBoardFilterPromptCapturesBoardKeys(t *testing.T) {
+	m := press(newFilterModel(), "/", "q")
+	if err := m.filters[TabDownloads].query; err != "q" {
+		t.Fatalf("q must be typed into the query, got %q", err)
+	}
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}}); cmd != nil {
+		t.Fatal("q must not quit while the filter prompt is open")
+	}
+
+	// esc inside the prompt clears and closes it.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if f := m.filters[TabDownloads]; f.open || f.query != "" {
+		t.Fatalf("esc must clear and close the prompt: %+v", f)
+	}
+}
+
+func TestBoardFilterReorderSkipsHiddenRows(t *testing.T) {
+	var order []int
+	m := NewModel(Options{
+		QueueURLs: []string{
+			"https://x/keep-1.mkv",
+			"https://x/x-1.mkv",
+			"https://x/x-2.mkv",
+			"https://x/x-3.mkv",
+			"https://x/keep-2.mkv",
+		},
+		Jobs:      2,
+		OnReorder: func(ids []int) { order = append([]int(nil), ids...) },
+	})
+
+	// Filter to rows 0 and 4; J swaps the selected row with the next
+	// *visible* one, which is row 4, not row 1.
+	m = press(m, "/", "k", "e", "e", "p", "enter", "J")
+	want := []int{4, 1, 2, 3, 0}
+	if fmt.Sprint(order) != fmt.Sprint(want) {
+		t.Fatalf("reorder ids = %v, want %v", order, want)
+	}
+	if m.selected != 4 {
+		t.Fatalf("selection = %d, want 4", m.selected)
+	}
+	// K walks back to the other match.
+	if m = press(m, "K"); m.selected != 0 {
+		t.Fatalf("K must return to the other match, got %d", m.selected)
+	}
+}
+
+func TestBoardFilterControlTargetsVisibleRow(t *testing.T) {
+	var gotID int
+	var gotAction ControlAction
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv"},
+		Jobs:      1,
+		OnControl: func(id int, a ControlAction) { gotID, gotAction = id, a },
+	})
+
+	m = press(m, "/", "b", "enter", " ")
+	if gotID != 1 || gotAction != ControlStart {
+		t.Fatalf("space hit id=%d action=%v, want start on job 1", gotID, gotAction)
+	}
+}
+
+func TestBoardFilterNoMatchMessageAndInertKeys(t *testing.T) {
+	h := &boardHooks{}
+	m := press(newHookedModel(h), "/", "z", "z", "z", "enter")
+
+	view := m.View()
+	if !strings.Contains(view, `no files match "zzz"`) {
+		t.Fatalf("no-match message missing:\n%s", view)
+	}
+	if !strings.Contains(view, "esc clears the filter") {
+		t.Fatalf("no-match hint missing:\n%s", view)
+	}
+
+	// Nothing visible means no control and no delete, even with keys pressed.
+	m = press(m, " ", "r", "x", "d")
+	if len(h.control) != 0 || h.del != 0 {
+		t.Fatalf("keys must be inert with no matches: %+v", h)
+	}
+	m = press(m, "J")
+	if m.selected != 0 {
+		t.Fatalf("reorder must be inert with no matches, selection=%d", m.selected)
+	}
+}
+
+func TestBoardFilterCompletedTab(t *testing.T) {
+	h := &boardHooks{}
+	m := press(newHookedModel(h), "2", "/", "b", ".", "m", "k", "v", "enter")
+
+	view := m.View()
+	if !strings.Contains(view, "b.mkv") || strings.Contains(view, "a.mkv") {
+		t.Fatalf("completed filter did not narrow the history:\n%s", view)
+	}
+	if !strings.Contains(view, `filter "b.mkv" · 1 of 2`) {
+		t.Fatalf("completed filter note missing:\n%s", view)
+	}
+
+	m = press(m, "d", "y")
+	if len(h.delHist) != 1 || h.delHist[0] != "raw-b" {
+		t.Fatalf("delete must target the filtered entry: %+v", h.delHist)
+	}
+	if !strings.Contains(m.View(), `no entries match "b.mkv"`) {
+		t.Fatalf("empty filtered history must say so:\n%s", m.View())
+	}
+
+	m = press(m, "esc")
+	if f := m.filters[TabCompleted]; f.query != "" {
+		t.Fatalf("esc must clear the completed filter: %+v", f)
+	}
+	if !strings.Contains(m.View(), "a.mkv") {
+		t.Fatalf("clearing the filter must bring the history back:\n%s", m.View())
+	}
+}
+
+func TestBoardFilterWindowCountsVisibleRows(t *testing.T) {
+	urls := make([]string, 24)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("https://x/file-%02d.mkv", i)
+	}
+	// Keep the 12 even-numbered files; the odd ones are filtered out.
+	for i := 0; i < 24; i += 2 {
+		urls[i] = strings.Replace(urls[i], "file-", "keep-", 1)
+	}
+	m := press(NewModel(Options{QueueURLs: urls, Jobs: 2}), "/", "k", "e", "e", "p", "enter")
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 17}) // window of 8
+
+	view := m.View()
+	if !strings.Contains(view, "▼ 4 more below") {
+		t.Fatalf("bottom marker must count matches (12 of 24):\n%s", view)
+	}
+	if strings.Contains(view, "file-00.mkv") {
+		t.Fatalf("non-matching row rendered:\n%s", view)
+	}
+
+	for i := 0; i < 11; i++ {
+		m = press(m, "j")
+	}
+	if m.selected != 22 || m.scrollOffset != 4 {
+		t.Fatalf("selection=%d offset=%d, want 22/4", m.selected, m.scrollOffset)
+	}
+	if !strings.Contains(m.View(), "▲ 4 more above") {
+		t.Fatalf("top marker must count matches above:\n%s", m.View())
+	}
+}
+
+// TestBoardFilteredViewKeepsFrameHeight: a filter shrinks the visible list but
+// must not change the chrome: the frame stays exactly one terminal tall, with
+// the header on top and the footer on the last line.
+func TestBoardFilteredViewKeepsFrameHeight(t *testing.T) {
+	for _, h := range []int{12, 17, 24} {
+		urls := make([]string, 40)
+		completed := make([]HistoryEntry, 40)
+		for i := range urls {
+			urls[i] = fmt.Sprintf("https://x/file-%02d.mkv", i)
+			completed[i] = HistoryEntry{
+				Text: fmt.Sprintf("2026-10-15 10:00:00  entry-%02d.mkv", i),
+				Ref:  fmt.Sprintf("raw-%d", i),
+			}
+		}
+		base := NewModel(Options{
+			QueueURLs: urls,
+			Completed: completed,
+			Jobs:      2,
+			Version:   "0.7.0",
+		})
+		base = update(base, tea.WindowSizeMsg{Width: 100, Height: h})
+
+		for _, tab := range []Tab{TabDownloads, TabCompleted} {
+			for _, q := range []string{"file-0", "zzz"} {
+				m := press(base, fmt.Sprint(tab+1), "/")
+				for _, r := range q {
+					m = press(m, string(r))
+				}
+				m = press(m, "enter")
+
+				view := m.View()
+				lines := strings.Split(view, "\n")
+				if len(lines) != h {
+					t.Errorf("height %d, tab %d, query %q: view is %d lines, want %d:\n%s",
+						h, tab, q, len(lines), h, view)
+				}
+				if !strings.HasPrefix(stripANSI(view), "dlm") {
+					t.Errorf("height %d, tab %d, query %q: header trimmed:\n%s", h, tab, q, view)
+				}
+				if last := stripANSI(lines[len(lines)-1]); !strings.Contains(last, "q quit") {
+					t.Errorf("height %d, tab %d, query %q: footer not last: %q", h, tab, q, last)
+				}
+			}
+		}
+	}
+}

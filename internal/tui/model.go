@@ -250,6 +250,11 @@ type Model struct {
 	input       string
 	inputKey    string // setting key being edited; "" means "add URLs"
 
+	// Per-page list filters: '/' narrows the downloads rows or the completed
+	// history. Each page owns its query, so switching tabs never applies one
+	// page's filter to another.
+	filters [TabSummary + 1]filterState
+
 	// Aggregate speed sampling for the footer sparkline.
 	haveSample bool
 	lastTotal  int64
@@ -267,6 +272,15 @@ type confirmPrompt struct {
 	Prompt string
 	OnYes  func(m *Model)
 	Cmd    func() tea.Cmd
+}
+
+// filterState is one page's list filter: the applied, case-insensitive
+// substring query, and whether the '/' prompt that edits it is open. The
+// query narrows the list live while the prompt is open; enter keeps it, esc
+// clears it.
+type filterState struct {
+	query string
+	open  bool
 }
 
 // windowSize is how many list rows fit on screen: terminal height minus the
@@ -575,6 +589,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// The filter prompt ('/' on downloads or completed) captures everything
+	// until enter/esc, so typing a query never triggers a board key.
+	if f := m.filterState(m.tab); f.open {
+		return m.handleFilterKey(msg)
+	}
+
 	// An open input line captures everything until enter/esc.
 	if m.inputActive {
 		return m.handleInputKey(msg)
@@ -582,8 +602,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Global keys work on every page.
 	switch msg.String() {
-	case "q", "esc", "ctrl+c":
+	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "esc":
+		// With a filter applied, esc clears it first; the next esc quits.
+		if m.clearFilter() {
+			return m, nil
+		}
+		return m, tea.Quit
+	case "/":
+		m.openFilter()
+		return m, nil
 	case "?":
 		m.help = true
 		return m, nil
@@ -697,7 +726,8 @@ func (m *Model) handleCompletedKey(msg tea.KeyMsg) tea.Cmd {
 	case "up", "k":
 		m.moveHistorySelection(-1)
 	case "d":
-		if m.opts.OnDeleteCompleted == nil || len(m.opts.Completed) == 0 {
+		if m.opts.OnDeleteCompleted == nil ||
+			visiblePos(m.visibleHistory(), m.selCompleted) < 0 {
 			return nil
 		}
 		idx := m.selCompleted
@@ -895,30 +925,70 @@ func (m *Model) ensureSettingsVisible() {
 	m.scrollSettings = clampInt(m.scrollSettings, 0, maxInt(0, len(m.opts.Settings)-window))
 }
 
+// clampHistorySelection keeps the history cursor on a visible entry after
+// the query or the history changed.
 func (m *Model) clampHistorySelection() {
-	if m.selCompleted >= len(m.opts.Completed) {
-		m.selCompleted = maxInt(0, len(m.opts.Completed)-1)
-	}
-	m.ensureHistoryVisible()
-}
-
-func (m *Model) moveHistorySelection(delta int) {
-	if len(m.opts.Completed) == 0 {
+	vis := m.visibleHistory()
+	if len(vis) == 0 {
+		m.selCompleted, m.scrollCompleted = 0, 0
 		return
 	}
-	m.selCompleted = (m.selCompleted + delta + len(m.opts.Completed)) % len(m.opts.Completed)
+	if visiblePos(vis, m.selCompleted) >= 0 {
+		m.ensureHistoryVisible()
+		return
+	}
+	for _, i := range vis {
+		if i > m.selCompleted {
+			m.selCompleted = i
+			m.ensureHistoryVisible()
+			return
+		}
+	}
+	m.selCompleted = vis[len(vis)-1]
 	m.ensureHistoryVisible()
 }
 
+// moveHistorySelection moves the history cursor one visible entry, wrapping.
+func (m *Model) moveHistorySelection(delta int) {
+	vis := m.visibleHistory()
+	if len(vis) == 0 {
+		return
+	}
+	pos := visiblePos(vis, m.selCompleted)
+	if pos < 0 {
+		if delta < 0 {
+			pos = len(vis) - 1
+		} else {
+			pos = 0
+		}
+	} else {
+		pos = (pos + delta + len(vis)) % len(vis)
+	}
+	m.selCompleted = vis[pos]
+	m.ensureHistoryVisible()
+}
+
+// ensureHistoryVisible scrolls the history window so the selected entry is
+// inside it; scrollCompleted is a position in the visible list.
 func (m *Model) ensureHistoryVisible() {
 	window := m.windowSize()
-	if m.selCompleted < m.scrollCompleted {
-		m.scrollCompleted = m.selCompleted
+	vis := m.visibleHistory()
+	if len(vis) == 0 {
+		m.selCompleted, m.scrollCompleted = 0, 0
+		return
 	}
-	if m.selCompleted >= m.scrollCompleted+window {
-		m.scrollCompleted = m.selCompleted - window + 1
+	pos := visiblePos(vis, m.selCompleted)
+	if pos < 0 {
+		m.selCompleted = vis[0]
+		pos = 0
 	}
-	m.scrollCompleted = clampInt(m.scrollCompleted, 0, maxInt(0, len(m.opts.Completed)-window))
+	if pos < m.scrollCompleted {
+		m.scrollCompleted = pos
+	}
+	if pos >= m.scrollCompleted+window {
+		m.scrollCompleted = pos - window + 1
+	}
+	m.scrollCompleted = clampInt(m.scrollCompleted, 0, maxInt(0, len(vis)-window))
 }
 
 // handleInputKey drives the 'a' add line: printable runes accumulate
@@ -959,6 +1029,9 @@ func (m Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				row.Status = RowQueued
 				m.rows = append(m.rows, row)
 			}
+			// Added rows may not match the applied filter; keep the cursor
+			// on something the user can see.
+			m.clampSelectionToVisible()
 		}
 	case tea.KeyBackspace:
 		// Rune-safe: delete one visible character, not one byte.
@@ -985,6 +1058,157 @@ func parseURLList(text string) []string {
 	return urls
 }
 
+// ---------------------------------------------------------------------------
+// List filter ('/')
+// ---------------------------------------------------------------------------
+
+// filterState returns a page's filter state; pages without a list yield the
+// zero value (never open, empty query).
+func (m Model) filterState(tab Tab) filterState {
+	if int(tab) < 0 || int(tab) > int(TabSummary) {
+		return filterState{}
+	}
+	return m.filters[tab]
+}
+
+// filterAt is the mutating counterpart of filterState.
+func (m *Model) filterAt(tab Tab) *filterState {
+	if int(tab) < 0 || int(tab) > int(TabSummary) {
+		return nil
+	}
+	return &m.filters[tab]
+}
+
+// clampCurrentSelection keeps the current page's cursor on a visible row
+// after the query changed.
+func (m *Model) clampCurrentSelection() {
+	if m.tab == TabCompleted {
+		m.clampHistorySelection()
+		return
+	}
+	m.clampSelectionToVisible()
+}
+
+// openFilter starts the '/' prompt on a page that has a list. The prompt
+// opens empty (the query is typed fresh) and narrows the list live.
+func (m *Model) openFilter() {
+	if m.tab != TabDownloads && m.tab != TabCompleted {
+		return
+	}
+	f := m.filterAt(m.tab)
+	if f == nil {
+		return
+	}
+	f.open = true
+	f.query = ""
+	m.clampCurrentSelection()
+}
+
+// clearFilter drops the current page's applied query and reports whether
+// there was one: esc clears the filter, then a second esc quits.
+func (m *Model) clearFilter() bool {
+	f := m.filterAt(m.tab)
+	if f == nil || f.query == "" {
+		return false
+	}
+	f.query, f.open = "", false
+	m.clampCurrentSelection()
+	return true
+}
+
+// handleFilterKey drives the '/' line: runes accumulate, backspace edits,
+// enter keeps the query, esc clears it.
+func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	f := m.filterAt(m.tab)
+	if f == nil {
+		return m, nil
+	}
+	switch msg.Type {
+	case tea.KeyEsc:
+		f.open, f.query = false, ""
+		m.clampCurrentSelection()
+	case tea.KeyEnter:
+		f.open = false
+	case tea.KeyBackspace:
+		if runes := []rune(f.query); len(runes) > 0 {
+			f.query = string(runes[:len(runes)-1])
+		}
+		m.clampCurrentSelection()
+	case tea.KeySpace:
+		f.query += " "
+		m.clampCurrentSelection()
+	case tea.KeyRunes:
+		f.query += string(msg.Runes)
+		m.clampCurrentSelection()
+	}
+	return m, nil
+}
+
+// matchesFilter reports whether text contains the applied query, ignoring
+// case. An empty query matches everything.
+func matchesFilter(text, query string) bool {
+	if query == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(text), strings.ToLower(query))
+}
+
+// visibleRows returns the absolute indices of the queue rows that pass the
+// downloads filter, in display order.
+func (m Model) visibleRows() []int {
+	vis := make([]int, 0, len(m.rows))
+	for i, r := range m.rows {
+		if matchesFilter(r.Label, m.filters[TabDownloads].query) {
+			vis = append(vis, i)
+		}
+	}
+	return vis
+}
+
+// visibleHistory is visibleRows for the completed tab.
+func (m Model) visibleHistory() []int {
+	vis := make([]int, 0, len(m.opts.Completed))
+	for i, e := range m.opts.Completed {
+		if matchesFilter(e.Text, m.filters[TabCompleted].query) {
+			vis = append(vis, i)
+		}
+	}
+	return vis
+}
+
+// visiblePos is idx's position in a visible index list, -1 when filtered out.
+func visiblePos(vis []int, idx int) int {
+	for pos, i := range vis {
+		if i == idx {
+			return pos
+		}
+	}
+	return -1
+}
+
+// clampSelectionToVisible keeps the downloads selection on a visible row
+// after the query, the row list, or the queue changed.
+func (m *Model) clampSelectionToVisible() {
+	vis := m.visibleRows()
+	if len(vis) == 0 {
+		m.selected, m.scrollOffset = 0, 0
+		return
+	}
+	if visiblePos(vis, m.selected) >= 0 {
+		m.ensureSelectionVisible()
+		return
+	}
+	for _, i := range vis {
+		if i > m.selected {
+			m.selected = i
+			m.ensureSelectionVisible()
+			return
+		}
+	}
+	m.selected = vis[len(vis)-1]
+	m.ensureSelectionVisible()
+}
+
 // confirmDeleteSelected asks before removing the selected file from the
 // queue (confirming also clears its queue-file line via OnDelete).
 func (m *Model) confirmDeleteSelected() {
@@ -993,6 +1217,10 @@ func (m *Model) confirmDeleteSelected() {
 	}
 	if m.selected >= len(m.rows) {
 		m.selected = len(m.rows) - 1
+	}
+	// With no visible match there is nothing to confirm deleting.
+	if visiblePos(m.visibleRows(), m.selected) < 0 {
+		return
 	}
 	idx := m.selected
 	row := m.rows[idx]
@@ -1004,18 +1232,27 @@ func (m *Model) confirmDeleteSelected() {
 			if cur.selected >= len(cur.rows) && cur.selected > 0 {
 				cur.selected--
 			}
-			cur.ensureSelectionVisible()
+			cur.clampSelectionToVisible()
 		},
 	}
 }
 
-// moveSelected reorders the selected row within the queue.
+// moveSelected reorders the selected row within the queue. With a filter
+// applied it swaps with the next/previous visible row: the selection always
+// moves one visible step, and hidden rows in between shift along with it.
 func (m *Model) moveSelected(delta int) {
 	if m.opts.OnReorder == nil || len(m.rows) < 2 {
 		return
 	}
-	target := m.selected + delta
-	if target < 0 || target >= len(m.rows) {
+	vis := m.visibleRows()
+	pos := visiblePos(vis, m.selected)
+	target := -1
+	if pos >= 0 {
+		if next := pos + delta; next >= 0 && next < len(vis) {
+			target = vis[next]
+		}
+	}
+	if target < 0 {
 		return
 	}
 	m.rows[m.selected], m.rows[target] = m.rows[target], m.rows[m.selected]
@@ -1029,36 +1266,52 @@ func (m *Model) moveSelected(delta int) {
 	m.opts.OnReorder(ids)
 }
 
+// moveSelection moves the cursor by delta rows, skipping rows the filter
+// hides. An empty list leaves the cursor at the top.
 func (m *Model) moveSelection(delta int) {
-	if len(m.rows) == 0 {
+	vis := m.visibleRows()
+	if len(vis) == 0 {
 		m.selected = 0
 		return
 	}
-	m.selected = (m.selected + delta + len(m.rows)) % len(m.rows)
+	pos := visiblePos(vis, m.selected)
+	if pos < 0 {
+		// The selected row was filtered out: continue from the nearest
+		// edge in the direction of travel.
+		if delta < 0 {
+			pos = len(vis) - 1
+		} else {
+			pos = 0
+		}
+	} else {
+		pos = (pos + delta + len(vis)) % len(vis)
+	}
+	m.selected = vis[pos]
 	m.ensureSelectionVisible()
 }
 
 // ensureSelectionVisible scrolls the window so the selected row is inside
-// the visible slice.
+// the visible slice. scrollOffset is a position in the visible list, which
+// equals the row's absolute index when no filter is applied.
 func (m *Model) ensureSelectionVisible() {
 	window := m.windowSize()
-	if m.selected < m.scrollOffset {
-		m.scrollOffset = m.selected
+	vis := m.visibleRows()
+	if len(vis) == 0 {
+		m.selected, m.scrollOffset = 0, 0
+		return
 	}
-	if m.selected >= m.scrollOffset+window {
-		m.scrollOffset = m.selected - window + 1
+	pos := visiblePos(vis, m.selected)
+	if pos < 0 {
+		m.selected = vis[0]
+		pos = 0
 	}
-
-	maxOffset := len(m.rows) - window
-	if maxOffset < 0 {
-		maxOffset = 0
+	if pos < m.scrollOffset {
+		m.scrollOffset = pos
 	}
-	if m.scrollOffset > maxOffset {
-		m.scrollOffset = maxOffset
+	if pos >= m.scrollOffset+window {
+		m.scrollOffset = pos - window + 1
 	}
-	if m.scrollOffset < 0 {
-		m.scrollOffset = 0
-	}
+	m.scrollOffset = clampInt(m.scrollOffset, 0, maxInt(0, len(vis)-window))
 }
 
 func (m *Model) controlSelected(action func(row *Row) ControlAction) {
@@ -1067,6 +1320,11 @@ func (m *Model) controlSelected(action func(row *Row) ControlAction) {
 	}
 	if m.selected >= len(m.rows) {
 		m.selected = len(m.rows) - 1
+	}
+	// A filter with no matches leaves no row to act on: never touch a row
+	// the user cannot see.
+	if visiblePos(m.visibleRows(), m.selected) < 0 {
+		return
 	}
 	row := m.rows[m.selected]
 	m.opts.OnControl(row.ID, action(row))
@@ -1161,6 +1419,12 @@ func (m Model) viewBottom() string {
 		b.WriteString(StyleDim.Render("y/enter confirm · n/esc cancel"))
 		return b.String()
 	}
+	if f := m.filterState(m.tab); f.open {
+		_, shown, total := m.filterScope()
+		b.WriteString(StyleStarting.Render("filter: ") + f.query + StyleDim.Render("▏"))
+		b.WriteString(StyleDim.Render(fmt.Sprintf("   %d of %d · enter keep · esc clear", shown, total)))
+		return b.String()
+	}
 	if m.inputActive {
 		label := "add url(s): "
 		hint := "enter to add · esc to cancel"
@@ -1176,6 +1440,9 @@ func (m Model) viewBottom() string {
 	saved, failed := m.counts()
 	// The summary panel is a snapshot, not a run view: it shows no status.
 	if m.tab != TabSummary {
+		if note := m.filterNote(); note != "" {
+			b.WriteString(StyleDim.Render(note) + " · ")
+		}
 		switch {
 		case m.finished():
 			summary := fmt.Sprintf("run finished — %d saved, %d failed", saved, failed)
@@ -1203,7 +1470,7 @@ func (m Model) viewBottom() string {
 			b.WriteString(StyleDim.Render(status))
 		}
 	}
-	b.WriteString("\n" + StyleDim.Render(m.pageHints()))
+	b.WriteString("\n" + truncateStyled(StyleDim.Render(m.pageHints()), m.contentWidth()))
 	if line := m.updateLine(); line != "" {
 		b.WriteString("\n" + line)
 	}
@@ -1219,7 +1486,8 @@ func (m Model) viewBottom() string {
 // footer. Modal layers (confirm, input) replace that whole area, so the
 // window must not reserve a row for it then.
 func (m Model) updateLineShown() bool {
-	return m.confirm == nil && !m.inputActive && (m.updating || m.updatedTo != "" || m.updateAvailable != "")
+	return m.confirm == nil && !m.inputActive && !m.filterState(m.tab).open &&
+		(m.updating || m.updatedTo != "" || m.updateAvailable != "")
 }
 
 // updateLine is the standalone notice between the key hints and the footer:
@@ -1241,7 +1509,7 @@ func (m Model) updateLine() string {
 func (m Model) pageHints() string {
 	switch m.tab {
 	case TabCompleted:
-		return "j/k scroll · d delete entry · c clear history"
+		return "j/k scroll · d delete entry · c clear history · / filter"
 	case TabSettings:
 		return "j/k select · enter edit · space toggle · r reset · R reset all · o editor"
 	case TabSummary:
@@ -1252,10 +1520,33 @@ func (m Model) pageHints() string {
 			sKey = "s stop all"
 		}
 		return fmt.Sprintf(
-			"space start/pause · %s · r retry · x cancel · a add · d delete · J/K move · o edit",
+			"space start/pause · %s · r retry · x cancel · a add · / filter · d delete · J/K move · o edit",
 			sKey,
 		)
 	}
+}
+
+// filterScope is the current page's applied query and how many rows it
+// matches out of the page's total. Pages without a filterable list report an
+// empty query and zero counts.
+func (m Model) filterScope() (query string, shown, total int) {
+	switch m.tab {
+	case TabDownloads:
+		return m.filters[TabDownloads].query, len(m.visibleRows()), len(m.rows)
+	case TabCompleted:
+		return m.filters[TabCompleted].query, len(m.visibleHistory()), len(m.opts.Completed)
+	}
+	return "", 0, 0
+}
+
+// filterNote summarizes the applied filter above the run status:
+// `filter "mkv" · 3 of 40`. Empty when the current page has no query.
+func (m Model) filterNote() string {
+	query, shown, total := m.filterScope()
+	if query == "" {
+		return ""
+	}
+	return fmt.Sprintf("filter %q · %d of %d", query, shown, total)
 }
 
 // activeCount counts rows the engine is currently working on (set-up or
@@ -1327,19 +1618,26 @@ func (m Model) viewDownloads() string {
 			StyleDim.Render("press a to add a URL, or o to edit the queue file in $EDITOR") + "\n"
 	}
 
+	vis := m.visibleRows()
+	if len(vis) == 0 {
+		return fmt.Sprintf("%s %q\n", StyleDim.Render("no files match"), m.filters[TabDownloads].query) +
+			StyleDim.Render("esc clears the filter · / edits it") + "\n"
+	}
+
 	var b strings.Builder
 
 	window := m.windowSize()
 	labelW, barW := m.rowLayout()
 
 	end := m.scrollOffset + window
-	if end > len(m.rows) {
-		end = len(m.rows)
+	if end > len(vis) {
+		end = len(vis)
 	}
 	if m.scrollOffset > 0 {
 		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▲ %d more above", m.scrollOffset)) + "\n")
 	}
-	for i := m.scrollOffset; i < end; i++ {
+	for pos := m.scrollOffset; pos < end; pos++ {
+		i := vis[pos]
 		r := m.rows[i]
 		marker := "  "
 		if i == m.selected {
@@ -1366,8 +1664,8 @@ func (m Model) viewDownloads() string {
 			b.WriteString(marker + StyleDim.Render("⊘ cancelled  "+r.Label) + "\n")
 		}
 	}
-	if end < len(m.rows) {
-		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(m.rows)-end)) + "\n")
+	if end < len(vis) {
+		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(vis)-end)) + "\n")
 	}
 	for _, line := range m.static {
 		b.WriteString(line + "\n")
@@ -1390,7 +1688,16 @@ func (m Model) viewCompleted() string {
 		b.WriteString("\n")
 	}
 
-	if len(m.opts.Completed) == 0 {
+	vis := m.visibleHistory()
+	if len(vis) == 0 {
+		if q := m.filters[TabCompleted].query; q != "" {
+			b.WriteString(fmt.Sprintf("%s %q\n", StyleDim.Render("no entries match"), q))
+			b.WriteString(StyleDim.Render("esc clears the filter · / edits it") + "\n")
+			if s.Dir != "" {
+				b.WriteString(m.outputLine())
+			}
+			return b.String()
+		}
 		b.WriteString(StyleDim.Render("no completed downloads yet") + "\n")
 		if s.Dir != "" {
 			b.WriteString(m.outputLine())
@@ -1400,22 +1707,23 @@ func (m Model) viewCompleted() string {
 
 	window := m.windowSize()
 	end := m.scrollCompleted + window
-	if end > len(m.opts.Completed) {
-		end = len(m.opts.Completed)
+	if end > len(vis) {
+		end = len(vis)
 	}
 
 	if m.scrollCompleted > 0 {
 		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▲ %d more above", m.scrollCompleted)) + "\n")
 	}
-	for i := m.scrollCompleted; i < end; i++ {
+	for pos := m.scrollCompleted; pos < end; pos++ {
+		i := vis[pos]
 		marker := "  "
 		if i == m.selCompleted {
 			marker = StyleTabActive.Render("▸ ")
 		}
 		b.WriteString(marker + truncateDisplay(m.opts.Completed[i].Text, m.contentWidth()-2) + "\n")
 	}
-	if end < len(m.opts.Completed) {
-		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(m.opts.Completed)-end)) + "\n")
+	if end < len(vis) {
+		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(vis)-end)) + "\n")
 	}
 
 	if s.Dir != "" {
@@ -1615,7 +1923,7 @@ func (m *Model) applyReload(jobs []JobRef) {
 	if m.selected >= len(m.rows) {
 		m.selected = maxInt(0, len(m.rows)-1)
 	}
-	m.ensureSelectionVisible()
+	m.clampSelectionToVisible()
 }
 
 // sampleSpeed records the aggregate transfer speed of one tick into the
@@ -1674,6 +1982,10 @@ func (m Model) viewHelp() string {
 		StyleDim.Render("board"),
 		"  1-4, tab   downloads / completed / settings / summary",
 		"  ?          this help · q quit (the run stops, parts resume later)",
+		"",
+		StyleDim.Render("filtering (downloads, completed)"),
+		"  /          narrow the list to matching names as you type",
+		"  enter      keep the filter · esc clears it (esc again quits)",
 		"",
 		StyleDim.Render("summary tab"),
 		"  r          refresh the queue/completed/downloads totals",
