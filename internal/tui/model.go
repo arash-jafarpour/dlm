@@ -173,6 +173,9 @@ type Options struct {
 	// OnOpenConfig opens the config file in $EDITOR; the returned command
 	// must deliver a SettingsMsg with the refreshed rows.
 	OnOpenConfig func() tea.Cmd
+	// OnOpenDir hands the downloads directory to the OS file manager; the
+	// returned command warns when the opener fails. Nil disables 'O'.
+	OnOpenDir func() tea.Cmd
 
 	// Settings-page hooks (nil disables the corresponding key row action).
 	// OnSettingSet validates and applies one key=value (persisting it).
@@ -777,6 +780,12 @@ func (m *Model) handleDownloadsKey(msg tea.KeyMsg) tea.Cmd {
 		if m.opts.OnOpenEditor != nil {
 			return m.opts.OnOpenEditor()
 		}
+	case "O":
+		// Same key on the completed page: the downloads folder is where the
+		// finished file lives either way.
+		if m.opts.OnOpenDir != nil {
+			return m.opts.OnOpenDir()
+		}
 	case " ":
 		m.controlSelected(func(row *Row) ControlAction {
 			switch row.Status {
@@ -857,6 +866,11 @@ func (m *Model) handleCompletedKey(msg tea.KeyMsg) tea.Cmd {
 				cur.selCompleted = 0
 				cur.scrollCompleted = 0
 			},
+		}
+	case "O":
+		// Finished files live in the downloads folder like everything else.
+		if m.opts.OnOpenDir != nil {
+			return m.opts.OnOpenDir()
 		}
 	}
 	return nil
@@ -2313,6 +2327,7 @@ func (m Model) viewHelp() string {
 		StyleDim.Render("board"),
 		"  1-4, tab   downloads / completed / settings / summary",
 		"  mouse      click a tab or row · wheel scrolls the current list",
+		"  O          open the downloads folder in your file manager",
 		"  ?          this help · q quit (the run stops, parts resume later)",
 		"",
 		StyleDim.Render("filtering (downloads, completed)"),

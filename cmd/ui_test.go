@@ -444,3 +444,20 @@ func TestUISnapshotQueueTruncatesAtFive(t *testing.T) {
 		t.Errorf("want %q in snapshot:\n%s", want, out)
 	}
 }
+
+// TestOpenDownloadsDirCreatesFolder: the folder exists before the opener is
+// launched, so a fresh install shows an empty directory instead of an error.
+func TestOpenDownloadsDirCreatesFolder(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "fresh", "downloads")
+
+	// An empty PATH guarantees the opener cannot be found: the call fails
+	// without ever launching a real file manager.
+	t.Setenv("PATH", "")
+	if err := openDownloadsDir(dir); err == nil {
+		t.Fatal("expected the opener to fail with an empty PATH")
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("downloads dir was not created: %v", err)
+	}
+}

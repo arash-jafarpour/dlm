@@ -2132,3 +2132,50 @@ func TestBoardMouseIgnoredWhilePromptOrHelp(t *testing.T) {
 		t.Fatalf("click while help is open switched to %v", m.tab)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// O (open the downloads folder)
+// ---------------------------------------------------------------------------
+
+func TestBoardOpenFolderKey(t *testing.T) {
+	hookCalls := 0
+	opts := Options{
+		QueueURLs: []string{"https://x/a.mkv"},
+		Completed: []HistoryEntry{{Text: "2026-10-15 10:00:00  a.mkv", Ref: "raw-a"}},
+		Jobs:      1,
+		OnOpenDir: func() tea.Cmd {
+			hookCalls++
+			return func() tea.Msg { return WarnMsg{Text: "boom"} }
+		},
+	}
+	m := NewModel(opts)
+
+	// Downloads: O forwards the hook's command untouched.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}})
+	m = next.(Model)
+	if hookCalls != 1 || cmd == nil {
+		t.Fatalf("O must call the hook once and return its command (calls=%d cmd=%v)", hookCalls, cmd)
+	}
+	if msg := cmd(); msg == nil || msg.(WarnMsg).Text != "boom" {
+		t.Fatalf("the hook's warning must reach the board, got %#v", msg)
+	}
+
+	// Completed: the same key opens the folder that holds the finished file.
+	m = press(m, "2", "O")
+	if hookCalls != 2 {
+		t.Fatalf("O on the completed page must call the hook, calls=%d", hookCalls)
+	}
+
+	// Other pages have no folder action.
+	m = press(m, "3", "O", "4", "O")
+	if hookCalls != 2 {
+		t.Fatalf("settings/summary must ignore O, calls=%d", hookCalls)
+	}
+}
+
+func TestBoardOpenFolderWithoutHookIsInert(t *testing.T) {
+	m := newTestModel() // no OnOpenDir
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}}); cmd != nil {
+		t.Fatal("O without a hook must not return a command")
+	}
+}

@@ -305,6 +305,16 @@ func runBoard(ctx *Context, urls []string, inline bool) error {
 				return tui.SettingsMsg{Settings: settingsRows(ctx.Config)}
 			})
 		},
+		OnOpenDir: func() tea.Cmd {
+			// Runs off the update loop; a failure surfaces as a footer
+			// warning instead of killing the board.
+			return func() tea.Msg {
+				if err := openDownloadsDir(ctx.Config.OutputDir); err != nil {
+					return tui.WarnMsg{Text: err.Error()}
+				}
+				return nil
+			}
+		},
 	})
 	prog = tea.NewProgram(model, opts...)
 
@@ -561,6 +571,29 @@ func editorCommand(file string) *exec.Cmd {
 		return exec.Command("notepad", file)
 	}
 	return exec.Command("vi", file)
+}
+
+// openDownloadsDir hands the downloads directory to the desktop file manager
+// (the board's 'O' key). The directory is created first so a fresh install
+// still opens something. Run blocks until the opener hands off, which these
+// launchers do immediately.
+func openDownloadsDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("downloads dir: %w", err)
+	}
+	var opener *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		opener = exec.Command("open", dir)
+	case "windows":
+		opener = exec.Command("explorer", dir)
+	default:
+		opener = exec.Command("xdg-open", dir)
+	}
+	if err := opener.Run(); err != nil {
+		return fmt.Errorf("open %s: %w", dir, err)
+	}
+	return nil
 }
 
 // storeForCompleted returns a store for completed-file operations; the

@@ -160,9 +160,10 @@ Keys are scoped per page, so a control never acts on another page's rows.
   `r` retry · `R` retry all failed · `x` cancel · `j`/`k` select and
   scroll · `a` add URLs · `d` delete (asks for confirmation) ·
   `J`/`K` move down/up · `g`/`G` move to top/bottom ·
-  `o` edit the queue file · `/` filter the list
+  `o` edit the queue file · `/` filter the list · `O` open the folder
 - **Completed**: `j`/`k` scroll · `d` delete the selected entry ·
-  `c` clear the history (both ask for confirmation) · `/` filter the list
+  `c` clear the history (both ask for confirmation) · `/` filter the list ·
+  `O` open the folder
 - **Settings**: `j`/`k` select · `enter` edit (or `space` to toggle a
   boolean) · `r` reset that value to its default · `R` reset everything ·
   `o` edit `config.json` by hand — resets ask for confirmation first
@@ -195,6 +196,10 @@ The board takes the mouse too: click a name in the tab strip to switch
 pages, click a row to select it, and use the wheel to scroll the current
 list. Clicks select only — destructive actions still need their key and
 confirmation.
+
+`O` opens the downloads folder in your file manager, from either the
+downloads or the completed page. The board creates the folder first, so a
+fresh install opens an empty one instead of failing.
 
 The completed tab lists date, time, file name, size, and duration for every
 finished download. While transfers run, the footer shows the aggregate
