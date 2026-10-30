@@ -158,7 +158,8 @@ func (b *boardQueue) reload() []tui.JobRef {
 // bubbletea board. Quitting cancels the run context: active transfers stop
 // at their next context check and partial .part files remain for resume.
 func runBoard(ctx *Context, urls []string, inline bool) error {
-	opts := []tea.ProgramOption{}
+	// Mouse is always on: click the tab strip, click a row, wheel to scroll.
+	opts := []tea.ProgramOption{tea.WithMouseCellMotion()}
 	if !inline {
 		opts = append(opts, tea.WithAltScreen())
 	}

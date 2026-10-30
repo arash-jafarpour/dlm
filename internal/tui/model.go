@@ -637,6 +637,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	}
 	return m, nil
 }
@@ -990,6 +993,168 @@ func (m *Model) handleSummaryKey(msg tea.KeyMsg) tea.Cmd {
 		return m.refreshSummary()
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Mouse
+// ---------------------------------------------------------------------------
+
+const (
+	// boardBodyStart is the first screen line of the page body: the frame
+	// renders the header, then the tab strip, then a rule.
+	boardBodyStart = 3
+	// mouseWheelRows is how far one wheel notch moves the cursor: enough to
+	// feel like scrolling, small enough not to overshoot a row.
+	mouseWheelRows = 3
+)
+
+// handleMouse maps clicks and wheel ticks onto the board: the tab strip
+// switches pages, rows take the cursor, and the wheel moves the current
+// page's cursor. Prompts and the help overlay swallow mouse input, like they
+// do keys.
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.help || m.modalOpen() {
+		return m, nil
+	}
+
+	switch msg.Button {
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+		delta := mouseWheelRows
+		if msg.Button == tea.MouseButtonWheelUp {
+			delta = -delta
+		}
+		m.scrollCurrentTab(delta)
+		return m, nil
+	}
+
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+
+	// The tab strip is the frame's second line.
+	if msg.Y == 1 {
+		tab, ok := tabAt(msg.X)
+		if !ok || tab == m.tab {
+			return m, nil
+		}
+		m.tab = tab
+		return m, m.refreshSummary()
+	}
+
+	line := msg.Y - boardBodyStart
+	if line < 0 {
+		return m, nil
+	}
+	idx, ok := m.rowAtBodyLine(line)
+	if !ok {
+		return m, nil
+	}
+	switch m.tab {
+	case TabDownloads:
+		m.selected = idx
+		m.ensureSelectionVisible()
+	case TabCompleted:
+		m.selCompleted = idx
+		m.ensureHistoryVisible()
+	case TabSettings:
+		m.selSettings = idx
+		m.ensureSettingsVisible()
+	}
+	return m, nil
+}
+
+// tabAt maps a column of the tab strip to the tab whose name covers it.
+// Names are ASCII and the separators are " · ".
+func tabAt(x int) (Tab, bool) {
+	off := 0
+	for i, name := range tabNames {
+		if x >= off && x < off+len(name) {
+			return Tab(i), true
+		}
+		off += len(name) + len(" · ")
+	}
+	return 0, false
+}
+
+// rowAtBodyLine maps a line of the page body (0 = first line under the rule)
+// to the item rendered there. It mirrors the marker, roll-up and note lines
+// the views emit, so a click on an item's line selects that item. ok is
+// false for markers, headers, notes, blank padding and non-list tabs.
+func (m Model) rowAtBodyLine(line int) (int, bool) {
+	switch m.tab {
+	case TabDownloads:
+		vis := m.visibleRows()
+		if len(vis) == 0 {
+			return 0, false // the no-match panel
+		}
+		if m.scrollOffset > 0 {
+			line-- // "▲ N more above"
+			if line < 0 {
+				return 0, false
+			}
+		}
+		pos := m.scrollOffset + line
+		if line >= m.windowSize() || pos < 0 || pos >= len(vis) {
+			return 0, false // static lines or blank padding
+		}
+		return vis[pos], true
+
+	case TabCompleted:
+		vis := m.visibleHistory()
+		if len(vis) == 0 {
+			return 0, false
+		}
+		if m.opts.Summary.Count > 0 {
+			line-- // "<n> downloads · <bytes> saved"
+		}
+		if m.scrollCompleted > 0 {
+			line-- // "▲ N more above"
+		}
+		pos := m.scrollCompleted + line
+		if line < 0 || line >= m.windowSize() || pos >= len(vis) {
+			return 0, false
+		}
+		return vis[pos], true
+
+	case TabSettings:
+		if len(m.opts.Settings) == 0 {
+			return 0, false
+		}
+		if m.scrollSettings > 0 {
+			line--
+		}
+		pos := m.scrollSettings + line
+		if line < 0 || line >= m.windowSize() || pos >= len(m.opts.Settings) {
+			return 0, false
+		}
+		return pos, true
+	}
+	return 0, false
+}
+
+// scrollCurrentTab moves the current page's cursor by delta rows, stopping
+// at the ends instead of wrapping (a wheel at the bottom should stay put).
+func (m *Model) scrollCurrentTab(delta int) {
+	switch m.tab {
+	case TabDownloads:
+		vis := m.visibleRows()
+		if pos := visiblePos(vis, m.selected); pos >= 0 {
+			m.selected = vis[clampInt(pos+delta, 0, len(vis)-1)]
+			m.ensureSelectionVisible()
+		}
+	case TabCompleted:
+		vis := m.visibleHistory()
+		if pos := visiblePos(vis, m.selCompleted); pos >= 0 {
+			m.selCompleted = vis[clampInt(pos+delta, 0, len(vis)-1)]
+			m.ensureHistoryVisible()
+		}
+	case TabSettings:
+		if len(m.opts.Settings) == 0 {
+			return
+		}
+		m.selSettings = clampInt(m.selSettings+delta, 0, len(m.opts.Settings)-1)
+		m.ensureSettingsVisible()
+	}
 }
 
 func (m *Model) clampSettingsSelection() {
@@ -2147,6 +2312,7 @@ func (m Model) viewHelp() string {
 		"",
 		StyleDim.Render("board"),
 		"  1-4, tab   downloads / completed / settings / summary",
+		"  mouse      click a tab or row · wheel scrolls the current list",
 		"  ?          this help · q quit (the run stops, parts resume later)",
 		"",
 		StyleDim.Render("filtering (downloads, completed)"),

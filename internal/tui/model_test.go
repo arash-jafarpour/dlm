@@ -1921,3 +1921,214 @@ func TestBoardHintsWrapWithoutClipping(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Mouse
+// ---------------------------------------------------------------------------
+
+func mouseClick(y, x int) tea.Msg {
+	return tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+}
+
+func mouseWheel(up bool) tea.Msg {
+	if up {
+		return tea.MouseMsg{X: 1, Y: 5, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp}
+	}
+	return tea.MouseMsg{X: 1, Y: 5, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
+}
+
+// lineWith finds the screen line holding needle (plain text) and its column.
+func lineWith(t *testing.T, m Model, needle string) (y, x int) {
+	t.Helper()
+	for y, line := range strings.Split(stripANSI(m.View()), "\n") {
+		if i := strings.Index(line, needle); i >= 0 {
+			return y, i
+		}
+	}
+	t.Fatalf("%q is not on screen:\n%s", needle, m.View())
+	return 0, 0
+}
+
+func TestBoardMouseClickSelectsRow(t *testing.T) {
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv"},
+		Jobs:      2,
+	})
+
+	y, x := lineWith(t, m, "c.mkv")
+	m = update(m, mouseClick(y, x))
+	if m.selected != 2 {
+		t.Fatalf("click on c.mkv selected %d, want 2", m.selected)
+	}
+
+	// Clicking blank space under the list leaves the cursor alone.
+	_, last := lineWith(t, m, "tab switch")
+	m = update(m, mouseClick(last, 1))
+	if m.selected != 2 {
+		t.Fatalf("a click on the footer must not select, got %d", m.selected)
+	}
+}
+
+func TestBoardMouseClickTabSwitches(t *testing.T) {
+	m := newTestModel()
+	y, x := lineWith(t, m, "completed")
+	m = update(m, mouseClick(y, x))
+	if m.tab != TabCompleted {
+		t.Fatalf("clicking completed switched to %v", m.tab)
+	}
+
+	y, x = lineWith(t, m, "settings")
+	m = update(m, mouseClick(y, x))
+	if m.tab != TabSettings {
+		t.Fatalf("clicking settings switched to %v", m.tab)
+	}
+
+	// A click on the strip's separators is not a tab.
+	strip := strings.Split(stripANSI(m.View()), "\n")[1]
+	m = update(m, mouseClick(1, strings.Index(strip, "·")))
+	if m.tab != TabSettings {
+		t.Fatalf("separator click switched to %v", m.tab)
+	}
+}
+
+func TestBoardMouseWheelScrollsCurrentList(t *testing.T) {
+	urls := make([]string, 20)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("https://x/file-%02d.mkv", i)
+	}
+	m := NewModel(Options{QueueURLs: urls, Jobs: 2})
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 17}) // window of 8
+
+	m = update(m, mouseWheel(false))
+	if m.selected != 3 {
+		t.Fatalf("one wheel notch = %d, want 3", m.selected)
+	}
+	for i := 0; i < 2; i++ {
+		m = update(m, mouseWheel(false))
+	}
+	if m.selected != 9 {
+		t.Fatalf("four notches = %d, want 9", m.selected)
+	}
+	if want := 9 - m.windowSize() + 1; m.scrollOffset != want {
+		t.Fatalf("the window must follow the wheel, offset = %d, want %d",
+			m.scrollOffset, want)
+	}
+
+	// Scrolling up clamps at the top instead of wrapping to the end.
+	for i := 0; i < 5; i++ {
+		m = update(m, mouseWheel(true))
+	}
+	if m.selected != 0 || m.scrollOffset != 0 {
+		t.Fatalf("wheel up must clamp at the top, got selection=%d offset=%d",
+			m.selected, m.scrollOffset)
+	}
+
+	// Down at the bottom also clamps.
+	for i := 0; i < 10; i++ {
+		m = update(m, mouseWheel(false))
+	}
+	if m.selected != len(urls)-1 {
+		t.Fatalf("wheel down must stop at the last row, got %d", m.selected)
+	}
+}
+
+func TestBoardMouseClickIgnoresMarkersAndHeaders(t *testing.T) {
+	urls := make([]string, 20)
+	completed := make([]HistoryEntry, 5)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("https://x/file-%02d.mkv", i)
+	}
+	for i := range completed {
+		completed[i] = HistoryEntry{
+			Text: fmt.Sprintf("2026-10-15 10:00:00  entry-%02d.mkv", i),
+			Ref:  fmt.Sprintf("raw-%d", i),
+		}
+	}
+	m := NewModel(Options{
+		QueueURLs: urls,
+		Completed: completed,
+		Jobs:      2,
+		Summary:   Summary{Count: 5, Dir: "/downloads"},
+	})
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 17})
+
+	// Scroll the queue so the "▲ more above" marker sits on the first body
+	// line; clicking it must not select anything.
+	m = press(m, "j", "j", "j", "j", "j", "j", "j", "j", "j", "j")
+	before := m.selected
+	y, x := lineWith(t, m, "▲")
+	m = update(m, mouseClick(y, x))
+	if m.selected != before {
+		t.Fatalf("clicking the scroll marker moved the selection to %d, want %d",
+			m.selected, before)
+	}
+
+	// The completed roll-up header is not a row either.
+	m = press(m, "2")
+	y, x = lineWith(t, m, "5 downloads")
+	m = update(m, mouseClick(y, x))
+	if m.selCompleted != 0 {
+		t.Fatalf("clicking the roll-up header selected %d", m.selCompleted)
+	}
+	// The output footer under the list is not a row either.
+	y, x = lineWith(t, m, "output  /downloads")
+	m = update(m, mouseClick(y, x))
+	if m.selCompleted != 0 {
+		t.Fatalf("clicking the output footer selected %d", m.selCompleted)
+	}
+}
+
+func TestBoardMouseClickCompletedRow(t *testing.T) {
+	m := newTestModel()
+	m = press(m, "2")
+	y, x := lineWith(t, m, "FAB - 21.mkv")
+	m = update(m, mouseClick(y, x))
+	if m.selCompleted != 0 {
+		t.Fatalf("completed row click selected %d, want 0", m.selCompleted)
+	}
+
+	// With a filter the visible row maps back to its absolute index.
+	m = press(m, "2", "/", "F", "A", "B", "enter")
+	if vis := m.visibleHistory(); len(vis) != 1 {
+		t.Fatalf("filter should leave one entry, got %v", vis)
+	}
+	y, x = lineWith(t, m, "FAB - 21.mkv")
+	m = update(m, mouseClick(y, x))
+	if m.selCompleted != 0 {
+		t.Fatalf("filtered click selected %d, want 0", m.selCompleted)
+	}
+}
+
+func TestBoardMouseClickSettingsRow(t *testing.T) {
+	m := newTestModel()
+	m = press(m, "3")
+	y, x := lineWith(t, m, "insecure_skip_verify")
+	m = update(m, mouseClick(y, x))
+	if m.tab != TabSettings || m.selSettings != 1 {
+		t.Fatalf("settings click: tab=%v selection=%d, want settings/1", m.tab, m.selSettings)
+	}
+}
+
+func TestBoardMouseIgnoredWhilePromptOrHelp(t *testing.T) {
+	h := &boardHooks{}
+	m := newHookedModel(h)
+	// A confirmation swallows mouse clicks, like keys.
+	m = press(m, "d")
+	if m.confirm == nil {
+		t.Fatal("d must open a confirmation")
+	}
+	y, x := lineWith(t, m, "b.mkv")
+	m = update(m, mouseClick(y, x))
+	if m.selected != 0 {
+		t.Fatalf("click while confirming moved the selection to %d", m.selected)
+	}
+	m = press(m, "n")
+
+	// The help overlay does too.
+	m = press(m, "n", "?")
+	y, x = lineWith(t, m, "completed")
+	m = update(m, mouseClick(y, x))
+	if m.tab != TabDownloads {
+		t.Fatalf("click while help is open switched to %v", m.tab)
+	}
+}

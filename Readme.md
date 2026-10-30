@@ -191,6 +191,11 @@ Destructive actions (removing a queued file, resetting settings, deleting
 or clearing history) always show a yes/no confirmation; `y`/`enter`
 accepts, `n`/`esc` cancels.
 
+The board takes the mouse too: click a name in the tab strip to switch
+pages, click a row to select it, and use the wheel to scroll the current
+list. Clicks select only — destructive actions still need their key and
+confirmation.
+
 The completed tab lists date, time, file name, size, and duration for every
 finished download. While transfers run, the footer shows the aggregate
 speed with a small sparkline.
