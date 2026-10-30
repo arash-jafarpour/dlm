@@ -212,6 +212,26 @@ func runBoard(ctx *Context, urls []string, inline bool) error {
 		Jobs:      maxJobs(ctx.Config.QueueJobs),
 		Version:   version,
 		Summary:   boardSummary(ctx),
+		// Background release check: failures stay silent (the user never
+		// asked), and dev builds report no version, so nothing is offered.
+		OnCheckUpdate: func() tea.Cmd {
+			return func() tea.Msg {
+				latest, err := checkForUpdate()
+				if err != nil || latest == "" {
+					return nil
+				}
+				return tui.UpdateAvailableMsg{Version: latest}
+			}
+		},
+		OnInstallUpdate: func() tea.Cmd {
+			return func() tea.Msg {
+				latest, err := installUpdate()
+				if err != nil {
+					return tui.UpdateFailedMsg{Err: err.Error()}
+				}
+				return tui.UpdateInstalledMsg{Version: latest}
+			}
+		},
 		OnSummary: func() tea.Cmd {
 			// Recomputed on the cmd side: the roll-up reads the history
 			// file, the queue file, and stats the output directory.

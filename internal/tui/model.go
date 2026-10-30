@@ -197,6 +197,14 @@ type Options struct {
 
 	// Version is the running dlm version, shown dim on the footer.
 	Version string
+
+	// OnCheckUpdate runs the background release check when the board starts;
+	// its command delivers UpdateAvailableMsg when a newer version exists.
+	// Nil disables the check (tests, non-release builds).
+	OnCheckUpdate func() tea.Cmd
+	// OnInstallUpdate downloads and installs the offered release; its command
+	// delivers UpdateInstalledMsg or UpdateFailedMsg.
+	OnInstallUpdate func() tea.Cmd
 }
 
 // defaultVisibleRows is the fallback window when the terminal size is not
@@ -229,6 +237,13 @@ type Model struct {
 	// board ignores every other key (including q).
 	confirm *confirmPrompt
 
+	// Update flow: the release the background check offered, whether its
+	// install is running, and the version installed this session (which only
+	// takes effect after a restart).
+	updateAvailable string
+	updating        bool
+	updatedTo       string
+
 	// Queue-editing input line ('a' on downloads, enter on a setting):
 	// active while the user types.
 	inputActive bool
@@ -246,17 +261,21 @@ type Model struct {
 
 // confirmPrompt is a pending yes/no question. OnYes receives the current
 // model so the confirmed action mutates the same value Update returns
-// (closures over the model would edit a stale copy).
+// (closures over the model would edit a stale copy). Cmd, when set, starts
+// the work the answer authorizes (e.g. downloading an update).
 type confirmPrompt struct {
 	Prompt string
 	OnYes  func(m *Model)
+	Cmd    func() tea.Cmd
 }
 
 // windowSize is how many list rows fit on screen: terminal height minus the
 // chrome (header, tabs, separators, warnings, status/hints/footer), the
 // tab's fixed body lines, and room for the ▲/▼ scroll markers. It must match
 // what View actually emits: bubbletea drops lines off the top when a frame
-// is taller than the terminal, which would hide the header.
+// is taller than the terminal, which would hide the header. View pads any
+// leftover rows, so a short list fills the window instead of floating the
+// footer up.
 func (m Model) windowSize() int {
 	if m.height <= 0 {
 		return defaultVisibleRows
@@ -264,6 +283,10 @@ func (m Model) windowSize() int {
 	// Chrome lines: header, tab strip, top separator, footer separator,
 	// status, hints, footer — plus one per transient warning.
 	n := m.height - 7 - len(m.warnings)
+	// The update notice owns a line of its own above the footer.
+	if m.updateLineShown() {
+		n--
+	}
 	// Body lines a tab spends on fixed content rather than list rows.
 	n -= m.tabExtraLines()
 	// Room for the "more above" / "more below" markers so a scrolled list
@@ -391,14 +414,35 @@ type SettingsMsg struct{ Settings []Setting }
 // output dir, queue depth).
 type SummaryMsg struct{ Summary Summary }
 
+// UpdateAvailableMsg offers a newer release after the background check. An
+// empty Version means the running build is current.
+type UpdateAvailableMsg struct{ Version string }
+
+// UpdateInstalledMsg reports that the newer release replaced the binary; it
+// takes effect on the next start.
+type UpdateInstalledMsg struct{ Version string }
+
+// UpdateFailedMsg reports an install failure; the running binary is intact.
+type UpdateFailedMsg struct{ Err string }
+
 // ---------------------------------------------------------------------------
 // Model plumbing
 // ---------------------------------------------------------------------------
 
-func (m Model) Init() tea.Cmd { return tickCmd() }
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(tickCmd(), m.checkUpdate())
+}
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// checkUpdate starts the background release check, if cmd wired one.
+func (m Model) checkUpdate() tea.Cmd {
+	if m.opts.OnCheckUpdate == nil {
+		return nil
+	}
+	return m.opts.OnCheckUpdate()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -471,6 +515,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.opts.Summary = msg.Summary
 		return m, nil
 
+	case UpdateAvailableMsg:
+		// A late answer must not clobber an install already under way or one
+		// that already succeeded this session.
+		if msg.Version != "" && !m.updating && m.updatedTo == "" {
+			m.updateAvailable = msg.Version
+		}
+		return m, nil
+
+	case UpdateInstalledMsg:
+		m.updating = false
+		m.updateAvailable = ""
+		m.updatedTo = msg.Version
+		return m, nil
+
+	case UpdateFailedMsg:
+		m.updating = false
+		m.warn("update failed: " + msg.Err)
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -482,18 +545,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// cancels, and even q is ignored so answered questions cannot be
 	// escaped by habit.
 	if m.confirm != nil {
+		var cmd tea.Cmd
 		switch msg.String() {
 		case "y", "enter":
 			onYes := m.confirm.OnYes
+			after := m.confirm.Cmd
 			m.confirm = nil
 			if onYes != nil {
 				onYes(&m)
+			}
+			if after != nil {
+				cmd = after()
 			}
 		case "n", "esc":
 			m.confirm = nil
 		}
 		// A confirmed delete/clear changes the completed totals.
-		return m, m.refreshSummary()
+		return m, tea.Batch(cmd, m.refreshSummary())
 	}
 
 	// The help overlay swallows everything except closing and quitting.
@@ -519,6 +587,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "?":
 		m.help = true
 		return m, nil
+	case "u":
+		return m, m.confirmUpdate()
 	case "tab", "right", "l":
 		m.tab = (m.tab + 1) % Tab(len(tabNames))
 		return m, m.refreshSummary()
@@ -543,6 +613,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleSummaryKey(msg)
 	}
 	return m, nil
+}
+
+// confirmUpdate asks before replacing the running binary; accepting starts
+// the install in the background and the footer reports its progress. It is a
+// no-op when no update was offered, one is running, or it already installed.
+func (m *Model) confirmUpdate() tea.Cmd {
+	if m.updateAvailable == "" || m.updating || m.updatedTo != "" || m.opts.OnInstallUpdate == nil {
+		return nil
+	}
+	version := m.updateAvailable
+	m.confirm = &confirmPrompt{
+		Prompt: fmt.Sprintf("Update dlm to v%s?  The running binary will be replaced.", version),
+		OnYes:  func(cur *Model) { cur.updating = true },
+		Cmd:    m.opts.OnInstallUpdate,
+	}
+	return nil
 }
 
 // handleDownloadsKey is the downloads page's own key map.
@@ -1012,7 +1098,7 @@ func (m *Model) replaceRow(old, fresh *Row) {
 
 func (m Model) View() string {
 	if m.help {
-		return m.viewHelp()
+		return padLines(strings.TrimRight(m.viewHelp(), "\n"), m.height)
 	}
 
 	var b strings.Builder
@@ -1049,10 +1135,23 @@ func (m Model) View() string {
 	}
 	// Exactly one newline after the body: any more would add a phantom line
 	// that pushes the header off a full-height frame.
-	b.WriteString(strings.TrimRight(body, "\n") + "\n")
+	b.WriteString(strings.TrimRight(body, "\n"))
+
+	// Insert the slack between the body and the bottom chrome so the footer
+	// stays on the window's last line whatever the body height: a short list
+	// leaves the body area tall rather than floating the status rows up.
+	return pinBottom(b.String(), m.viewBottom(), m.height)
+}
+
+// viewBottom renders the bottom chrome: transient warnings, the rule, then
+// either the modal/input lines or the status, key hints, and footer.
+func (m Model) viewBottom() string {
+	var b strings.Builder
 
 	for _, w := range m.warnings {
-		b.WriteString(StyleWarn.Render(w) + "\n")
+		// Keep a long diagnostic (an update failure, say) on one line so the
+		// reserved chrome rows stay honest.
+		b.WriteString(StyleWarn.Render(truncateStyled(w, m.contentWidth())) + "\n")
 	}
 	b.WriteString(StyleDim.Render("─") + "\n")
 
@@ -1105,12 +1204,37 @@ func (m Model) View() string {
 		}
 	}
 	b.WriteString("\n" + StyleDim.Render(m.pageHints()))
+	if line := m.updateLine(); line != "" {
+		b.WriteString("\n" + line)
+	}
 	footer := StyleDim.Render("tab switch · 1-4 tabs · ? help · q quit")
 	if m.opts.Version != "" {
 		footer = padBetween(footer, StyleDim.Render("dlm "+m.opts.Version), m.width)
 	}
 	b.WriteString("\n" + footer)
 	return b.String()
+}
+
+// updateLineShown reports whether the update notice adds a line above the
+// footer. Modal layers (confirm, input) replace that whole area, so the
+// window must not reserve a row for it then.
+func (m Model) updateLineShown() bool {
+	return m.confirm == nil && !m.inputActive && (m.updating || m.updatedTo != "" || m.updateAvailable != "")
+}
+
+// updateLine is the standalone notice between the key hints and the footer:
+// the offered release with its shortcut, the running install, or the restart
+// reminder after success.
+func (m Model) updateLine() string {
+	switch {
+	case m.updating:
+		return StyleWarn.Render(spinnerFrame(m.spin) + " updating dlm to v" + m.updateAvailable + "…")
+	case m.updatedTo != "":
+		return StyleOK.Render("dlm v" + m.updatedTo + " installed · restart dlm to use it · q quit")
+	case m.updateAvailable != "":
+		return StyleWarn.Render("v" + m.updateAvailable + " is available · u update")
+	}
+	return ""
 }
 
 // pageHints is the per-page key reminder shown above the global line.
@@ -1554,6 +1678,9 @@ func (m Model) viewHelp() string {
 		StyleDim.Render("summary tab"),
 		"  r          refresh the queue/completed/downloads totals",
 		"",
+		StyleDim.Render("updates"),
+		"  u          install the newer release the footer offers, then restart dlm",
+		"",
 		StyleDim.Render("row states"),
 		"  · waiting for you   held — nothing happens until you start it",
 		"  spinner             starting: dispatched or waiting for a slot",
@@ -1607,6 +1734,36 @@ func padBetween(left, right string, width int) string {
 		gap = 1
 	}
 	return left + strings.Repeat(" ", gap) + right
+}
+
+// padLines appends blank lines so frame fills height rows. For frames without
+// a pinned last line (the help overlay); frame must not end with a newline,
+// or the count gains a phantom line.
+func padLines(frame string, height int) string {
+	if height <= 0 {
+		return frame
+	}
+	lines := strings.Count(frame, "\n") + 1
+	if lines >= height {
+		return frame
+	}
+	return frame + strings.Repeat("\n", height-lines)
+}
+
+// pinBottom joins top and bottom into a frame that fills height rows by
+// growing the gap between them, so bottom's last line lands on the window's
+// bottom edge. Neither fragment may end with a newline; a frame that already
+// meets or exceeds the window is joined without extra blank lines.
+func pinBottom(top, bottom string, height int) string {
+	if height <= 0 {
+		return top + "\n" + bottom
+	}
+	lines := strings.Count(top, "\n") + 1 + strings.Count(bottom, "\n") + 1
+	blank := height - lines
+	if blank <= 0 {
+		return top + "\n" + bottom
+	}
+	return top + strings.Repeat("\n", blank+1) + bottom
 }
 
 func maxInt(a, b int) int {

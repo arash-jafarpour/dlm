@@ -301,3 +301,81 @@ func exeWithContent(t *testing.T, content []byte) string {
 	}
 	return exe
 }
+
+// withVersion pins the running build's version for the release-check tests and
+// restores the injected value afterwards.
+func withVersion(t *testing.T, v string) {
+	t.Helper()
+	prev := version
+	version = v
+	t.Cleanup(func() { version = prev })
+}
+
+func TestCheckForUpdateOffersNewerRelease(t *testing.T) {
+	archive := makeTarGz(t, []byte("bin"))
+	f := newFakeReleaseServer(t, archiveName("tar.gz"), "v1.1.0", archive, "")
+	swapGHAPI(t, f.srv.URL)
+	withVersion(t, "v1.0.0")
+
+	got, err := checkForUpdate()
+	if err != nil {
+		t.Fatalf("checkForUpdate: %v", err)
+	}
+	if got != "1.1.0" {
+		t.Errorf("offered version = %q, want 1.1.0", got)
+	}
+}
+
+func TestCheckForUpdateSilentWhenCurrentOrDev(t *testing.T) {
+	archive := makeTarGz(t, []byte("bin"))
+	f := newFakeReleaseServer(t, archiveName("tar.gz"), "v1.0.0", archive, "")
+	swapGHAPI(t, f.srv.URL)
+
+	// Same version: nothing to offer.
+	withVersion(t, "v1.0.0")
+	got, err := checkForUpdate()
+	if err != nil || got != "" {
+		t.Fatalf("current build: got (%q, %v), want no offer and no error", got, err)
+	}
+
+	// A development build must not even reach GitHub, so a dead endpoint is
+	// harmless: this is the "never nag" path for unreleased builds.
+	withVersion(t, "dev")
+	swapGHAPI(t, "http://127.0.0.1:1")
+	got, err = checkForUpdate()
+	if err != nil || got != "" {
+		t.Fatalf("dev build: got (%q, %v), want no offer and no error", got, err)
+	}
+}
+
+func TestInstallUpdateToReplacesBinary(t *testing.T) {
+	newBin := []byte("new binary v1.1")
+	archive := makeTarGz(t, newBin)
+	f := newFakeReleaseServer(t, archiveName("tar.gz"), "v1.1.0", archive, "")
+	swapGHAPI(t, f.srv.URL)
+	withVersion(t, "v1.0.0")
+
+	exe := exeWithContent(t, []byte("old binary v1.0"))
+	got, err := installUpdateTo(exe)
+	if err != nil {
+		t.Fatalf("installUpdateTo: %v", err)
+	}
+	if got != "1.1.0" {
+		t.Errorf("installed version = %q, want 1.1.0", got)
+	}
+	if content, err := os.ReadFile(exe); err != nil || !bytes.Equal(content, newBin) {
+		t.Errorf("binary = %q (err %v), want %q", content, err, newBin)
+	}
+}
+
+func TestInstallUpdateToRejectsCurrentBuild(t *testing.T) {
+	archive := makeTarGz(t, []byte("bin"))
+	f := newFakeReleaseServer(t, archiveName("tar.gz"), "v1.0.0", archive, "")
+	swapGHAPI(t, f.srv.URL)
+	withVersion(t, "v1.0.0")
+
+	exe := exeWithContent(t, []byte("old"))
+	if _, err := installUpdateTo(exe); err == nil || !strings.Contains(err.Error(), "up to date") {
+		t.Fatalf("expected an up-to-date error, got %v", err)
+	}
+}

@@ -99,6 +99,71 @@ func runUpdate(checkOnly bool) error {
 	return nil
 }
 
+// checkForUpdate returns the newest release version when it is newer than the
+// running build, empty otherwise. Development builds (no semver) report an
+// empty version, so the board's background check stays silent instead of
+// warning about a binary it cannot compare or replace.
+func checkForUpdate() (string, error) {
+	current, err := currentSemver()
+	if err != nil {
+		return "", nil
+	}
+	latest, _, err := fetchNewerRelease(current)
+	if err != nil || latest == nil {
+		return "", err
+	}
+	return latest.String(), nil
+}
+
+// installUpdate downloads and installs the newest release over the running
+// binary, returning the installed version.
+func installUpdate() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("could not locate the dlm executable: %w", err)
+	}
+	return installUpdateTo(exe)
+}
+
+// installUpdateTo is installUpdate against an explicit executable, so tests
+// can replace a fixture instead of the running test binary. GitHub is
+// re-queried here: the asset must match the release that is current at
+// install time, not the one seen when the check ran.
+func installUpdateTo(exe string) (string, error) {
+	current, err := currentSemver()
+	if err != nil {
+		return "", err
+	}
+	latest, release, err := fetchNewerRelease(current)
+	if err != nil {
+		return "", err
+	}
+	if latest == nil {
+		return "", fmt.Errorf("dlm is already up to date (v%s)", current)
+	}
+	if err := installAssetQuiet(release, exe); err != nil {
+		return "", fmt.Errorf("update failed: %w", err)
+	}
+	return latest.String(), nil
+}
+
+// fetchNewerRelease resolves the latest release and compares it with current.
+// release and latest are nil when the running build is already current.
+func fetchNewerRelease(current *semver.Version) (*semver.Version, *ghRelease, error) {
+	release, err := fetchLatestRelease(repoSlug)
+	if err != nil {
+		return nil, nil, err
+	}
+	latest, err := semver.NewVersion(release.TagName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not parse release tag %q: %w", release.TagName, err)
+	}
+	if !latest.GreaterThan(current) {
+		return nil, nil, nil
+	}
+	return latest, release, nil
+}
+
 // currentSemver returns the base semantic version of the running build, or an
 // error if it is a development build that cannot be updated or compared.
 func currentSemver() (*semver.Version, error) {
@@ -135,6 +200,17 @@ func (p *progressHash) Write(b []byte) (int, error) {
 // atomically replaces exe. The existing binary is never touched before the
 // new archive has passed its checksum.
 func installAsset(release *ghRelease, exe string) error {
+	return installAssetWithProgress(release, exe, true)
+}
+
+// installAssetQuiet installs like installAsset but draws no terminal progress
+// bar: the interactive board owns the screen, and the bar's \r redraws would
+// corrupt the frame.
+func installAssetQuiet(release *ghRelease, exe string) error {
+	return installAssetWithProgress(release, exe, false)
+}
+
+func installAssetWithProgress(release *ghRelease, exe string, showProgress bool) error {
 	asset, err := release.assetForPlatform()
 	if err != nil {
 		return err
@@ -160,7 +236,7 @@ func installAsset(release *ghRelease, exe string) error {
 	tmpName := tmp.Name()
 
 	var bar *ui.Bar
-	if asset.Size > 0 {
+	if showProgress && asset.Size > 0 {
 		bar = ui.NewBarWithOffset(asset.Size, asset.Name, 0)
 	}
 

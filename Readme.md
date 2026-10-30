@@ -154,7 +154,8 @@ date, time, and file name.
 
 Keys are scoped per page, so a control never acts on another page's rows.
 
-- **Global**: `tab`/`←`/`→` switch tabs · `1`–`4` jump · `?` help · `q` quit
+- **Global**: `tab`/`←`/`→` switch tabs · `1`–`4` jump · `?` help ·
+  `u` install an offered update · `q` quit
 - **Downloads**: `space` start/pause · `s` start all / stop all ·
   `r` retry · `x` cancel · `j`/`k` select and scroll · `a` add URLs ·
   `d` delete (asks for confirmation) · `J`/`K` move down/up ·
@@ -179,6 +180,13 @@ accepts, `n`/`esc` cancels.
 The completed tab lists date, time, file name, size, and duration for every
 finished download. While transfers run, the footer shows the aggregate
 speed with a small sparkline.
+
+The board checks GitHub for a newer release in the background when it
+starts. If one exists, the footer offers it right above the running version
+(`v0.7.0 is available · u update`). `u` asks for confirmation first, then
+downloads the release, verifies its SHA256, swaps the binary, and leaves a
+`restart dlm to use it` reminder on the footer. The check is silent on
+development builds and when the network or rate limit says no.
 
 Queue edits apply immediately and are written straight to `queue.txt`
 (the add line accepts several whitespace-separated URLs at once; deleting

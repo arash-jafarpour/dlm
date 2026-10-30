@@ -338,14 +338,243 @@ func TestBoardViewFitsTerminalHeight(t *testing.T) {
 				}
 
 				view := m.View()
-				if lines := len(strings.Split(view, "\n")); lines > h {
-					t.Errorf("height %d, %d items, tab %d: view is %d lines:\n%s", h, n, tab, lines, view)
+				if lines := len(strings.Split(view, "\n")); lines != h {
+					t.Errorf("height %d, %d items, tab %d: view is %d lines, want %d:\n%s", h, n, tab, lines, h, view)
 				}
 				if !strings.HasPrefix(stripANSI(view), "dlm") {
 					t.Errorf("height %d, %d items, tab %d: header trimmed:\n%s", h, n, tab, view)
 				}
 			}
 		}
+	}
+}
+
+// TestBoardFooterPinsToBottom: whatever the content height, the footer is the
+// window's last line. A short list must grow the body area, not float the
+// status rows up the screen.
+func TestBoardFooterPinsToBottom(t *testing.T) {
+	for _, h := range []int{12, 30, 40} {
+		for _, n := range []int{0, 1, 5} {
+			urls := make([]string, n)
+			for i := range urls {
+				urls[i] = fmt.Sprintf("https://x/file-%02d.mkv", i)
+			}
+			base := NewModel(Options{
+				QueueURLs: urls,
+				Jobs:      1,
+				Version:   "1.2.3",
+			})
+			base = update(base, tea.WindowSizeMsg{Width: 100, Height: h})
+
+			for _, tab := range []Tab{TabDownloads, TabCompleted, TabSettings, TabSummary} {
+				m := base
+				m.tab = tab
+
+				lines := strings.Split(m.View(), "\n")
+				if len(lines) != h {
+					t.Errorf("height %d, %d items, tab %d: view is %d lines, want %d:\n%s",
+						h, n, tab, len(lines), h, m.View())
+					continue
+				}
+				last := stripANSI(lines[len(lines)-1])
+				if !strings.Contains(last, "tab switch") || !strings.Contains(last, "dlm 1.2.3") {
+					t.Errorf("height %d, %d items, tab %d: footer is not the last line: %q",
+						h, n, tab, last)
+				}
+			}
+		}
+	}
+}
+
+// TestBoardModalPinsToBottom: the confirm and input layers replace the
+// status area but still end on the window's last line.
+func TestBoardModalPinsToBottom(t *testing.T) {
+	const height = 24
+	m := NewModel(Options{QueueURLs: []string{"https://x/a.mkv"}, Jobs: 1})
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: height})
+
+	m.confirm = &confirmPrompt{Prompt: "Delete a.mkv?"}
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != height {
+		t.Fatalf("confirm view is %d lines, want %d", len(lines), height)
+	}
+	if last := stripANSI(lines[len(lines)-1]); !strings.Contains(last, "y/enter confirm") {
+		t.Fatalf("confirm hint must be the last line: %q", last)
+	}
+
+	m.confirm = nil
+	m.inputActive = true
+	lines = strings.Split(m.View(), "\n")
+	if len(lines) != height {
+		t.Fatalf("input view is %d lines, want %d", len(lines), height)
+	}
+	if last := stripANSI(lines[len(lines)-1]); !strings.Contains(last, "enter to add") {
+		t.Fatalf("input hint must be the last line: %q", last)
+	}
+}
+
+// TestHelpFillsTerminalHeight: the help overlay has no footer but still owns
+// the whole window rather than collapsing to its content.
+func TestHelpFillsTerminalHeight(t *testing.T) {
+	const height = 40
+	m := NewModel(Options{QueueURLs: []string{"https://x/a.mkv"}, Jobs: 1})
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: height})
+	m.help = true
+
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != height {
+		t.Fatalf("help view is %d lines, want %d", len(lines), height)
+	}
+	if !strings.Contains(stripANSI(lines[0]), "dlm — keys") {
+		t.Fatalf("help title must stay on the first line: %q", lines[0])
+	}
+}
+
+// TestBoardUpdateCheckStartsOnInit: the background release check is wired
+// into the board's first command.
+func TestBoardUpdateCheckStartsOnInit(t *testing.T) {
+	called := false
+	m := NewModel(Options{
+		QueueURLs:     []string{"https://x/a.mkv"},
+		OnCheckUpdate: func() tea.Cmd { called = true; return nil },
+	})
+	if m.Init() == nil {
+		t.Fatal("Init must keep the repaint tick")
+	}
+	if !called {
+		t.Fatal("Init must start the background update check")
+	}
+}
+
+// TestBoardUpdateNoticeAndInstall: the offered release is advertised above
+// the version, u asks first, and success turns into a restart reminder.
+func TestBoardUpdateNoticeAndInstall(t *testing.T) {
+	var installRequested bool
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv"},
+		Jobs:      1,
+		Version:   "0.6.0",
+		OnInstallUpdate: func() tea.Cmd {
+			installRequested = true
+			return func() tea.Msg { return UpdateInstalledMsg{Version: "0.7.0"} }
+		},
+	})
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = update(m, UpdateAvailableMsg{Version: "0.7.0"})
+
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "v0.7.0 is available · u update") {
+		t.Fatalf("update notice missing:\n%s", view)
+	}
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != 24 {
+		t.Fatalf("view is %d lines, want 24", len(lines))
+	}
+	if last := stripANSI(lines[len(lines)-1]); !strings.Contains(last, "dlm 0.6.0") {
+		t.Fatalf("footer must stay on the last line with the notice: %q", last)
+	}
+
+	// u asks before touching the binary.
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if m.confirm == nil || !strings.Contains(m.confirm.Prompt, "v0.7.0") {
+		t.Fatalf("u must ask for confirmation, got %+v", m.confirm)
+	}
+	if installRequested {
+		t.Fatal("install must wait for the confirmation")
+	}
+
+	// Accepting starts the background install and reports it in the footer.
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if m.confirm != nil {
+		t.Fatal("confirmation must close on y")
+	}
+	if !m.updating || !installRequested {
+		t.Fatal("y must start the install")
+	}
+	if view := stripANSI(m.View()); !strings.Contains(view, "updating dlm to v0.7.0") {
+		t.Fatalf("install progress missing:\n%s", view)
+	}
+
+	// The hook's command reports success; the notice becomes a restart
+	// reminder and the old offer disappears.
+	msg := m.opts.OnInstallUpdate()()
+	m = update(m, msg)
+	view = stripANSI(m.View())
+	if !strings.Contains(view, "dlm v0.7.0 installed · restart dlm to use it") {
+		t.Fatalf("restart prompt missing:\n%s", view)
+	}
+	if strings.Contains(view, "u update") {
+		t.Fatalf("the old offer must clear after install:\n%s", view)
+	}
+
+	// u is inert once installed (nothing left to fetch).
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if m.confirm != nil {
+		t.Fatal("u must not offer an install after the update succeeded")
+	}
+}
+
+// TestBoardUpdateFailureWarnsAndKeepsOffer: a failed install leaves the old
+// binary running, reports why, and still offers a retry.
+func TestBoardUpdateFailureWarnsAndKeepsOffer(t *testing.T) {
+	m := NewModel(Options{
+		QueueURLs:       []string{"https://x/a.mkv"},
+		Jobs:            1,
+		Version:         "0.6.0",
+		OnInstallUpdate: func() tea.Cmd { return func() tea.Msg { return nil } },
+	})
+	m = update(m, tea.WindowSizeMsg{Width: 60, Height: 20})
+	m = update(m, UpdateAvailableMsg{Version: "0.7.0"})
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+
+	m = update(m, UpdateFailedMsg{Err: "network unreachable"})
+	view := stripANSI(m.View())
+	if m.updating {
+		t.Fatal("a failed install must clear the running flag")
+	}
+	if !strings.Contains(view, "update failed: network unreachable") {
+		t.Fatalf("failure warning missing:\n%s", view)
+	}
+	if !strings.Contains(view, "v0.7.0 is available · u update") {
+		t.Fatalf("the offer must survive so u can retry:\n%s", view)
+	}
+	if lines := strings.Split(m.View(), "\n"); len(lines) != 20 {
+		t.Fatalf("view is %d lines, want 20", len(lines))
+	}
+}
+
+// TestBoardUpdateKeyIgnoredWithoutOffer: u does nothing unless a release was
+// actually offered by the background check.
+func TestBoardUpdateKeyIgnoredWithoutOffer(t *testing.T) {
+	m := NewModel(Options{QueueURLs: []string{"https://x/a.mkv"}, Jobs: 1})
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if m.confirm != nil {
+		t.Fatalf("u without an offered release must be inert, got %q", m.confirm.Prompt)
+	}
+}
+
+// TestBoardUpdateNoticeFitsWindow: the extra notice line comes out of the
+// body window, so a full list still fits and the footer stays last.
+func TestBoardUpdateNoticeFitsWindow(t *testing.T) {
+	const height = 12
+	urls := make([]string, 50)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("https://x/file-%02d.mkv", i)
+	}
+	m := NewModel(Options{QueueURLs: urls, Jobs: 2, Version: "0.6.0"})
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: height})
+	m = update(m, UpdateAvailableMsg{Version: "9.9.9"})
+
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != height {
+		t.Fatalf("view is %d lines, want %d:\n%s", len(lines), height, m.View())
+	}
+	if notice := stripANSI(lines[height-2]); !strings.Contains(notice, "v9.9.9 is available") {
+		t.Fatalf("notice must sit directly above the footer: %q", notice)
+	}
+	if last := stripANSI(lines[height-1]); !strings.Contains(last, "dlm 0.6.0") {
+		t.Fatalf("footer lost the last line: %q", last)
 	}
 }
 
