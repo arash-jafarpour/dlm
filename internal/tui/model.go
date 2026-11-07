@@ -236,7 +236,10 @@ type Model struct {
 	// (visual), marks are vim visual-mode semantics: the span between the
 	// stroke's anchor and the cursor is marked, and the rest of the visible
 	// list is put back to the pre-stroke snapshot, so retracing over your
-	// own stroke unmarks it again.
+	// own stroke unmarks it again. A stroke is also read-only: the keys
+	// that change the set or download state (start, stop, delete,
+	// deselect) do nothing until esc ends it — controlling the set is
+	// normal mode's job (S, D).
 	selection map[int]bool
 	visual    bool
 	// vAnchor is the stroke anchor's row ID; vPre is the selection as it
@@ -869,6 +872,16 @@ func (m *Model) confirmUpdate() tea.Cmd {
 
 // handleDownloadsKey is the downloads page's own key map.
 func (m *Model) handleDownloadsKey(msg tea.KeyMsg) tea.Cmd {
+	// A stroke is read-only: selection is being built, and download
+	// state must not change underneath it. The control, delete, and
+	// deselect keys are silently ignored until esc ends the stroke; the
+	// set actions (S start them, D delete them) wait for normal mode.
+	if m.visual {
+		switch msg.String() {
+		case "d", "D", "s", "S", " ", "r", "c", "x", "X":
+			return nil
+		}
+	}
 	switch msg.String() {
 	case "down", "j":
 		m.moveSelection(1)
@@ -888,11 +901,12 @@ func (m *Model) handleDownloadsKey(msg tea.KeyMsg) tea.Cmd {
 		m.inputKey = ""
 		m.visual = false
 	case "d":
-		if m.visual {
-			m.confirmDeleteSelection()
-		} else {
-			m.confirmDeleteSelected()
-		}
+		m.confirmDeleteSelected()
+	case "D":
+		// The set action: remove every marked row (the mark survives
+		// strokes, so it works on a scattered selection too). No marks,
+		// nothing to confirm.
+		m.confirmDeleteSelection()
 	case "J":
 		if m.visual {
 			m.moveSelectionBlock(1)
@@ -930,18 +944,8 @@ func (m *Model) handleDownloadsKey(msg tea.KeyMsg) tea.Cmd {
 			return m.opts.OnOpenDir()
 		}
 	case " ":
-		if m.visual {
-			m.toggleSelection()
-		} else {
-			m.toggleSelected()
-		}
+		m.toggleSelected()
 	case "s":
-		if m.visual {
-			// A stroke is active: s toggles the marked rows instead of
-			// the whole queue — the same per-row mapping space applies.
-			m.toggleSelection()
-			return nil
-		}
 		if m.opts.OnControl != nil {
 			// Toggle: with anything active, s stops the whole run and
 			// returns started files to the held state; otherwise it
@@ -997,7 +1001,10 @@ func (m *Model) handleCompletedKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		m.confirm = &confirmPrompt{
-			Prompt: fmt.Sprintf("Clear the entire completed list (%d entries)?", len(m.opts.Completed)),
+			Prompt: fmt.Sprintf(
+				"Clear the entire completed list (%d entries)?",
+				len(m.opts.Completed),
+			),
 			OnYes: func(cur *Model) {
 				if err := cur.opts.OnClearCompleted(); err != nil {
 					cur.warn(err.Error())
@@ -1225,8 +1232,12 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case TabDownloads:
 		m.selected = idx
 		m.ensureSelectionVisible()
-		// A click is the mouse's space: start the file, or stop it again.
-		m.toggleSelected()
+		// A click is the mouse's space — start the file, or stop it. A
+		// stroke must not change download state, so it just moves the
+		// cursor; the click controls again once esc ends the stroke.
+		if !m.visual {
+			m.toggleSelected()
+		}
 	case TabCompleted:
 		m.selCompleted = idx
 		m.ensureHistoryVisible()
@@ -1644,8 +1655,8 @@ func (m *Model) clampSelectionToVisible() {
 	m.ensureSelectionVisible()
 }
 
-// confirmDeleteSelected asks before removing the selected file from the
-// queue (confirming also clears its queue-file line via OnDelete).
+// confirmDeleteSelected asks before removing the file under the cursor from
+// the queue (d; confirming also clears its queue-file line via OnDelete).
 func (m *Model) confirmDeleteSelected() {
 	if m.opts.OnDelete == nil || len(m.rows) == 0 {
 		return
@@ -1946,9 +1957,9 @@ func (m *Model) endStroke() {
 	m.vPre = map[int]bool{}
 }
 
-// deselectCursor unmarks the row under the cursor. Inside a stroke the span
-// would instantly re-mark the row, so the stroke ends first: hand-editing
-// the set is a normal-mode gesture.
+// deselectCursor unmarks the row under the cursor (x). It is a
+// normal-mode gesture: a stroke ignores it, since the span would
+// instantly re-mark the row anyway.
 func (m *Model) deselectCursor() {
 	m.endStroke()
 	if row, ok := m.selectedRow(); ok {
@@ -1956,7 +1967,9 @@ func (m *Model) deselectCursor() {
 	}
 }
 
-// clearSelection unmarks everything and ends any stroke.
+// clearSelection unmarks everything and, if a stroke is on, ends it.
+// Like x it only applies in normal mode: the key handler ignores it
+// during a stroke.
 func (m *Model) clearSelection() {
 	m.selection = map[int]bool{}
 	m.endStroke()
@@ -2138,28 +2151,9 @@ func (m *Model) startSelection() {
 	}
 }
 
-// toggleSelection applies the space mapping to every selected row that
-// passes the current filter: each pauses, resumes, starts or retries on its
-// own merits. A saved row has nothing to start or stop and is skipped.
-func (m *Model) toggleSelection() {
-	if m.opts.OnControl == nil {
-		return
-	}
-	vis := m.visibleRows()
-	for _, i := range vis {
-		if !m.selection[m.rows[i].ID] {
-			continue
-		}
-		action, ok := controlActionFor(m.rows[i])
-		if !ok {
-			continue
-		}
-		m.opts.OnControl(m.rows[i].ID, action)
-	}
-}
-
-// confirmDeleteSelection asks once before removing every selected row that
-// passes the current filter; accepting drops them all and ends the stroke.
+// confirmDeleteSelection asks once before removing every marked row (the D
+// action) that passes the current filter; accepting drops them all and
+// ends the stroke.
 func (m *Model) confirmDeleteSelection() {
 	if m.opts.OnDelete == nil {
 		return
@@ -2300,7 +2294,9 @@ func (m Model) viewBottom() string {
 	if f := m.filterState(m.tab); f.open {
 		_, shown, total := m.filterScope()
 		b.WriteString(StyleStarting.Render("filter: ") + f.query + StyleDim.Render("▏"))
-		b.WriteString(StyleDim.Render(fmt.Sprintf("   %d of %d · enter keep · esc clear", shown, total)))
+		b.WriteString(
+			StyleDim.Render(fmt.Sprintf("   %d of %d · enter keep · esc clear", shown, total)),
+		)
 		return b.String()
 	}
 	if m.inputActive {
@@ -2388,9 +2384,13 @@ func (m Model) updateLineShown() bool {
 func (m Model) updateLine() string {
 	switch {
 	case m.updating:
-		return StyleUpdate.Render(spinnerFrame(m.spin) + " updating dlm to v" + m.updateAvailable + "…")
+		return StyleUpdate.Render(
+			spinnerFrame(m.spin) + " updating dlm to v" + m.updateAvailable + "…",
+		)
 	case m.updatedTo != "":
-		return StyleUpdate.Render("✓ dlm v" + m.updatedTo + " installed · restart dlm to use it · q quit")
+		return StyleUpdate.Render(
+			"✓ dlm v" + m.updatedTo + " installed · restart dlm to use it · q quit",
+		)
 	case m.updateAvailable != "":
 		return StyleUpdate.Render("↑ v" + m.updateAvailable + " is available · u update")
 	}
@@ -2412,14 +2412,15 @@ func (m Model) pageHints() string {
 			sKey = "s stop all"
 		}
 		if m.visual {
-			return "VISUAL select · j/k mark more rows · x deselect row · X clear all · d delete the set · s/S start/pause the set · space toggle row/rows · esc keep selection"
+			return "VISUAL select · j/k mark more rows · esc back to normal"
 		}
 		if n := len(m.selectionIDs()); n > 0 {
 			// With marks on screen, the set is the interesting part: S
 			// starts them, and the single-row keys say so explicitly.
 			return fmt.Sprintf(
-				"%d selected · S start them · s %s · r retry one · c cancel one · x deselect · X clear all · v stroke · d delete one · J/K g/G move",
-				n, sKey[2:],
+				"%d selected · S start them · s %s · r retry one · c cancel one · x deselect · X clear all · v stroke · d delete one · D delete the set · J/K g/G move",
+				n,
+				sKey[2:],
 			)
 		}
 		return fmt.Sprintf(
@@ -2523,8 +2524,14 @@ func (m Model) viewDownloads() string {
 
 	vis := m.visibleRows()
 	if len(vis) == 0 {
-		return fmt.Sprintf("%s %q\n", StyleDim.Render("no files match"), m.filters[TabDownloads].query) +
-			StyleDim.Render("esc clears the filter · / edits it") + "\n"
+		return fmt.Sprintf(
+			"%s %q\n",
+			StyleDim.Render("no files match"),
+			m.filters[TabDownloads].query,
+		) +
+			StyleDim.Render(
+				"esc clears the filter · / edits it",
+			) + "\n"
 	}
 
 	var b strings.Builder
@@ -2566,7 +2573,9 @@ func (m Model) viewDownloads() string {
 		case RowStarting:
 			// The app is on it: dispatched or waiting for a free slot
 			// while the transfer is set up.
-			b.WriteString(marker + StyleStarting.Render(spinnerFrame(m.spin)+" starting  "+r.Label) + "\n")
+			b.WriteString(
+				marker + StyleStarting.Render(spinnerFrame(m.spin)+" starting  "+r.Label) + "\n",
+			)
 		case RowSaved:
 			// Plain by default; the cursor row alone gets the light gray.
 			detail := r.Detail
@@ -2719,11 +2728,19 @@ func (m Model) viewSettings() string {
 		b.WriteString(truncateStyled(line, m.contentWidth()) + "\n")
 	}
 	if end < len(m.opts.Settings) {
-		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(m.opts.Settings)-end)) + "\n")
+		b.WriteString(
+			StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(m.opts.Settings)-end)) + "\n",
+		)
 	}
 
-	b.WriteString("\n" + StyleWarn.Render("note: restart dlm after a change so it takes full effect"))
-	b.WriteString("\n" + StyleWarn.Render("note: changing num_chunks restarts partial downloads from the beginning"))
+	b.WriteString(
+		"\n" + StyleWarn.Render("note: restart dlm after a change so it takes full effect"),
+	)
+	b.WriteString(
+		"\n" + StyleWarn.Render(
+			"note: changing num_chunks restarts partial downloads from the beginning",
+		),
+	)
 	return b.String()
 }
 
@@ -2910,7 +2927,9 @@ func (m Model) viewHelp() string {
 		"",
 		StyleDim.Render("downloads"),
 		"  space      start the selected file / pause it / back to held",
-		"  s/S        start all (flowing: " + fmt.Sprint(m.opts.Jobs) + " at a time) · s again stops all · in a stroke, s/S start/pause the marked files",
+		"  s/S        start all (flowing: " + fmt.Sprint(
+			m.opts.Jobs,
+		) + " at a time) · s again stops all · S starts only the marked files",
 		"  r          retry the selected file (failed, paused or cancelled)",
 		"  R          retry every failed file (ignores the filter)",
 		"  c          cancel the selected file",
@@ -2918,14 +2937,15 @@ func (m Model) viewHelp() string {
 		"",
 		StyleDim.Render("queue editing"),
 		"  a          add URLs (paste several, whitespace separated; enter adds)",
-		"  d          delete the selected file (visual: the whole block)",
+		"  d          delete the file under the cursor · D delete every marked file",
 		"  J/K        move the selected file down/up · g/G to its top/bottom (also ctrl+↑/↓)",
 		"  v          visual select: j/k marks rows (esc keeps them) · x/X deselect one/all",
+		"             in a stroke, x/X and start/stop/delete are off until esc returns to normal",
 		"  o          edit the queue file in $EDITOR (settings tab: the config)",
 		"",
 		StyleDim.Render("board"),
 		"  1-4, tab   downloads / completed / settings / summary",
-		"  mouse      click a tab · click a download to start/stop it · click a setting to edit",
+		"  mouse      click a tab · click a download to start/stop it (off in a stroke) · click a setting to edit",
 		"  O          open the downloads folder in your file manager",
 		"  ?          this help · q quit (the run stops, parts resume later)",
 		"",

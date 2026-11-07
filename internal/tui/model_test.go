@@ -1990,10 +1990,11 @@ func TestVisualStrokeMarksAndKeeps(t *testing.T) {
 		t.Fatalf("scattered set wrong: %v", m.selection)
 	}
 
-	// x unmarks the cursor row and ends the stroke: the span could not be
-	// trusted around a hand-edit. j/k afterwards marks nothing until a new
-	// v stroke starts.
-	m = press(m, "k", "v", "x") // up onto 3, mark it, unmark it again
+	// x unmarks the cursor row, but only in normal mode: in a stroke it
+	// is ignored (the span would instantly re-mark the row anyway). esc
+	// ends the stroke first, then x hand-edits the set, and j/k
+	// afterwards marks nothing until a new v stroke starts.
+	m = press(m, "k", "v", "esc", "x") // up onto 3, mark it, unmark it again
 	if m.selection[3] || m.visual {
 		t.Fatalf("x must unmark the cursor row and end the stroke: %v visual=%v", m.selection, m.visual)
 	}
@@ -2116,9 +2117,10 @@ func TestBoardStartSelectedKey(t *testing.T) {
 	m = update(m, JobStateMsg{ID: 3, State: RowFailed})
 	m = update(m, JobStateMsg{ID: 4, State: RowCancelled})
 
-	// First stroke marks a(0); a second one marks c..e, leaving running b
-	// un-cluttered? untouched. Two strokes into one scattered set.
-	m = press(m, "v", "esc", "j", "j", "v", "j", "j", "S")
+	// First stroke marks a(0); a second one marks c..e. S waits outside
+	// the stroke, so esc ends it first — the marks survive — and S starts
+	// the scattered set: running b is left alone.
+	m = press(m, "v", "esc", "j", "j", "v", "j", "j", "esc", "S")
 	want := []hit{
 		{0, ControlStart},
 		{2, ControlResume},
@@ -2130,7 +2132,7 @@ func TestBoardStartSelectedKey(t *testing.T) {
 	}
 
 	// The same key outside a stroke acts on whatever survives of the set.
-	m = press(m, "esc", "X", "k", "k", "k", "k", "v", "S")
+	m = press(m, "esc", "X", "k", "k", "k", "k", "v", "esc", "S")
 	if len(got) != 5 {
 		t.Fatalf("S must act on a set of one, got %v", got)
 	}
@@ -2146,12 +2148,13 @@ func TestBoardStartSelectedKey(t *testing.T) {
 	}
 }
 
-func TestBoardStrokeSTogglesSelected(t *testing.T) {
+func TestStrokeKeysAreInert(t *testing.T) {
 	type hit struct {
 		id     int
 		action ControlAction
 	}
 	var got []hit
+	var deleted []int
 	m := NewModel(Options{
 		QueueURLs: []string{
 			"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv",
@@ -2159,32 +2162,33 @@ func TestBoardStrokeSTogglesSelected(t *testing.T) {
 		},
 		Jobs:      1,
 		OnControl: func(id int, action ControlAction) { got = append(got, hit{id, action}) },
+		OnDelete:  func(id int) { deleted = append(deleted, id) },
 	})
 
-	// Just to prove s is scoped: d is running, so the old s would have
-	// sent a global stop-all instead.
+	// Just to prove the keys are scoped: d is running, so a global s
+	// would have sent a stop-all, and a marked-set s would hit the pair.
 	m = update(m, FileStartedMsg{ID: 3, Row: newRow(3, "d.mkv", 10, 0)})
 
-	// Stroke over a first, then over c — b sits unmarked between them, and
-	// running d is never marked. Pressing s inside the second stroke must
-	// start exactly the marked pair: no global start-all (the engine id -1
-	// never fires), no touching of b or d.
-	m = press(m, "v", "esc", "j", "j", "v", "s")
-	want := []hit{
-		{0, ControlStart},
-		{2, ControlStart},
+	// A stroke is read-only: s, S, space, r, c, d, D, x and X must all
+	// be silent no-ops — no per-row actions, no global toggle, no confirm
+	// dialog, nothing deselected or deleted. The marks stay put.
+	m = press(m, "v", "j", "j", "s", "S", " ", "r", "c", "d", "D", "x", "X")
+	if len(got) != 0 {
+		t.Fatalf("control keys in a stroke fired: %v", got)
 	}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("s in a stroke = %v, want %v (marked only, no global toggle)", got, want)
+	if len(deleted) != 0 || m.confirm != nil {
+		t.Fatalf("delete keys in a stroke leaked: deleted=%v confirm=%v", deleted, m.confirm)
+	}
+	if len(m.selection) != 3 || !m.visual {
+		t.Fatalf("deselect keys in a stroke leaked: selection=%v visual=%v",
+			m.selection, m.visual)
 	}
 
-	// The toggle's stop side: mark just the running d and press s again —
-	// the per-row mapping pauses it, while a global stop-all would have
-	// taken the whole run down and reset the clock.
-	got = nil
-	m = press(m, "esc", "X", "j", "v", "s")
-	if fmt.Sprint(got) != fmt.Sprint([]hit{{3, ControlPause}}) {
-		t.Fatalf("s on a marked running row = %v, want pause on d", got)
+	// Back in normal mode the same keys work again: d is running, so s
+	// stops the whole run.
+	m = press(m, "esc", "s")
+	if fmt.Sprint(got) != fmt.Sprint([]hit{{-1, ControlStopAll}}) {
+		t.Fatalf("s after esc = %v, want a global stop-all", got)
 	}
 }
 
@@ -2291,15 +2295,16 @@ func TestVisualScatteredMovesWarnAndDoNothing(t *testing.T) {
 		t.Fatalf("a scattered set must not be moved to an edge: %v", order)
 	}
 
-	// Clearing the set brings the run back: mark c..e contiguously and the
+	// Clearing the set brings the run back: end the stroke, X clears all
+	// (another normal-mode-only gesture), mark c..e contiguously and the
 	// block moves again.
-	m = press(m, "X", "v", "j", "j", "K")
+	m = press(m, "esc", "X", "v", "j", "j", "K")
 	if fmt.Sprint(order) != "[0 2 3 4 1]" {
 		t.Fatalf("contiguous block move = %v, want [0 2 3 4 1]", order)
 	}
 }
 
-func TestVisualSpaceStartsAndPausesEveryRow(t *testing.T) {
+func TestVisualStrokeSpaceIsInert(t *testing.T) {
 	type hit struct {
 		id     int
 		action ControlAction
@@ -2315,14 +2320,20 @@ func TestVisualSpaceStartsAndPausesEveryRow(t *testing.T) {
 	m = update(m, FileStartedMsg{ID: 1, Row: newRow(1, "b.mkv", 10, 0)})
 	m = update(m, JobStateMsg{ID: 2, State: RowPaused})
 
+	// In a stroke, space is completely inert: the marked block keeps its
+	// marks, and nothing is started, stopped or resumed.
 	m = press(m, "v", "j", "j", " ")
-	want := []hit{
-		{0, ControlStart},
-		{1, ControlPause},
-		{2, ControlResume},
+	if len(got) != 0 {
+		t.Fatalf("space in a stroke fired: %v", got)
 	}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("space on the block = %v, want %v (per-row mapping)", got, want)
+	if m.selected != 2 || len(m.selection) != 3 {
+		t.Fatalf("cursor=%d selection=%v: the stroke must survive space untouched", m.selected, m.selection)
+	}
+
+	// Out of the stroke, space controls the cursor's own row again.
+	m = press(m, "esc", " ")
+	if fmt.Sprint(got) != fmt.Sprint([]hit{{2, ControlResume}}) {
+		t.Fatalf("space after esc = %v, want resume on the cursor row", got)
 	}
 }
 
@@ -2334,7 +2345,14 @@ func TestVisualSelectionDeleteAsksOnce(t *testing.T) {
 		OnDelete:  func(id int) { deleted = append(deleted, id) },
 	})
 
-	m = press(m, "v", "j", "d")
+	// Stroke over a..b, then esc: D waits for normal mode. While the
+	// stroke is still on, d/D must do nothing at all.
+	m = press(m, "v", "j", "d", "D")
+	if m.confirm != nil || len(deleted) != 0 {
+		t.Fatalf("delete during a stroke leaked: confirm=%v deleted=%v", m.confirm, deleted)
+	}
+
+	m = press(m, "esc", "D")
 	if m.confirm == nil {
 		t.Fatal("deleting the selection must ask for confirmation first")
 	}
@@ -2348,8 +2366,8 @@ func TestVisualSelectionDeleteAsksOnce(t *testing.T) {
 		t.Fatalf("cancel must keep the rows: rows=%d confirm=%v", len(m.rows), m.confirm)
 	}
 
-	// Confirming removes the whole selection in one go and ends the stroke.
-	m = press(m, "d", "y")
+	// Confirming removes the whole selection in one go.
+	m = press(m, "D", "y")
 	if fmt.Sprint(deleted) != "[0 1]" {
 		t.Fatalf("deleted ids = %v, want [0 1]", deleted)
 	}
@@ -2375,8 +2393,8 @@ func TestVisualSelectionDeleteScatteredSet(t *testing.T) {
 	})
 
 	// Deletion covers the whole set even when it is scattered: mark a and
-	// c, keep the stroke on, delete.
-	m = press(m, "v", "esc", "j", "j", "v", "d")
+	// c with two strokes, end the stroke, delete with D.
+	m = press(m, "v", "esc", "j", "j", "v", "esc", "D")
 	if m.confirm == nil {
 		t.Fatal("deleting a scattered set must ask first")
 	}
@@ -2499,6 +2517,35 @@ func TestBoardMouseClickSelectsRow(t *testing.T) {
 	m = update(m, mouseClick(last, 1))
 	if m.selected != 2 {
 		t.Fatalf("a click on the footer must not select, got %d", m.selected)
+	}
+}
+
+func TestVisualStrokeClickOnlyMovesCursor(t *testing.T) {
+	var got []ControlAction
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv"},
+		Jobs:      1,
+		OnControl: func(id int, action ControlAction) { got = append(got, action) },
+	})
+
+	y, x := lineWith(t, m, "c.mkv")
+	m = press(m, "v")
+	m = update(m, mouseClick(y, x))
+	if m.selected != 2 {
+		t.Fatalf("a click in a stroke must still select, got %d", m.selected)
+	}
+	if len(got) != 0 {
+		t.Fatalf("a click in a stroke must not control the row, got %v", got)
+	}
+	if !m.visual {
+		t.Fatalf("a click must not end the stroke")
+	}
+
+	// Out of the stroke the same click controls the row again.
+	m = press(m, "esc")
+	m = update(m, mouseClick(y, x))
+	if fmt.Sprint(got) != fmt.Sprint([]ControlAction{ControlStart}) {
+		t.Fatalf("click after esc = %v, want a start", got)
 	}
 }
 

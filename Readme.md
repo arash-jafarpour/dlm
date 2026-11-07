@@ -157,8 +157,11 @@ Keys are scoped per page, so a control never acts on another page's rows.
 - **Global**: `tab`/`←`/`→` switch tabs · `1`–`4` jump · `?` help ·
   `u` install an offered update · `q` quit
 - **Downloads**: `space` start/pause · `s` start all / stop all ·
-  `r` retry · `R` retry all failed · `x` cancel · `j`/`k` select and
-  scroll · `a` add URLs · `d` delete (asks for confirmation) ·
+  `S` start the marked files · `r` retry · `R` retry all failed ·
+  `c` cancel · `j`/`k` select and scroll · `a` add URLs ·
+  `d` delete under the cursor · `D` delete the marked files (both ask
+  for confirmation) · `v` visual select: rows are marked and
+  start/stop/delete/deselect wait until `esc` (click included) ·
   `J`/`K` move down/up · `g`/`G` move to top/bottom ·
   `o` edit the queue file · `/` filter the list · `O` open the folder
 - **Completed**: `j`/`k` scroll · `d` delete the selected entry ·
