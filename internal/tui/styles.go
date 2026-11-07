@@ -23,6 +23,14 @@ var (
 	// the same blue as the other board highlights, so it cannot be mistaken
 	// for the dim status/hint/footer text it sits between.
 	StyleUpdate = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	// StyleVisual marks the rows the visual-mode block covers: the same
+	// blue, so a selection reads as "held" rather than as a cursor.
+	StyleVisual = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	// StyleModeNormal / StyleModeVisual are the lualine-like mode segment at
+	// the left of the status line: an inverted block reading at a glance.
+	// NORMAL is muted gray; VISUAL borrows the board's active blue.
+	StyleModeNormal = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("250")).Background(lipgloss.Color("236"))
+	StyleModeVisual = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("235")).Background(lipgloss.Color("39"))
 )
 
 // renderRow draws one live progress line, shaped like the plain-CLI rows so

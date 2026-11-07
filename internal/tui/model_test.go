@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -136,10 +137,10 @@ func TestBoardSelectionAndControls(t *testing.T) {
 		t.Fatalf("space on waiting row: got id=%d action=%v, want start on job 1", gotID, gotAction)
 	}
 
-	// x cancels, r retries the selected row.
-	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	// c cancels, r retries the selected row.
+	m = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	if gotAction != ControlCancel {
-		t.Fatalf("x: got %v, want cancel", gotAction)
+		t.Fatalf("c: got %v, want cancel", gotAction)
 	}
 	update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	if gotAction != ControlRetry {
@@ -1896,6 +1897,499 @@ func TestBoardMoveSelectedToEdgeSkipsHiddenRows(t *testing.T) {
 	}
 	if m.selected != 2 {
 		t.Fatalf("selection = %d, want 2", m.selected)
+	}
+}
+
+// visualBlockModel builds a fresh five-row board with the named file labels
+// in queue order, for the visual-mode tests below.
+func visualBlockModel(labels ...string) Model {
+	urls := make([]string, len(labels))
+	for i, label := range labels {
+		urls[i] = "https://x/" + label
+	}
+	return NewModel(Options{QueueURLs: urls, Jobs: 1})
+}
+
+func TestVisualStrokeMarksAndKeeps(t *testing.T) {
+	m := visualBlockModel("a.mkv", "b.mkv", "c.mkv", "d.mkv", "e.mkv")
+
+	// v marks the cursor row right away; every row the moving cursor
+	// crosses joins the set.
+	m = press(m, "v", "j", "j")
+	if !m.visual {
+		t.Fatal("v must start a select stroke")
+	}
+	for _, id := range []int{0, 1, 2} {
+		if !m.selection[id] {
+			t.Fatalf("row %d must be marked: %v", id, m.selection)
+		}
+	}
+	if m.selection[3] {
+		t.Fatal("uncrossed rows must stay unmarked")
+	}
+	plain := stripANSI(m.View())
+	// The cursor row paints its own ▸ over the mark, so two ▪ remain.
+	if n := strings.Count(plain, "▪"); n != 2 {
+		t.Fatalf("marker number = %d, want 2:\n%s", n, plain)
+	}
+	if !strings.Contains(m.pageHints(), "VISUAL select") {
+		t.Fatalf("hints must show the mode:\n%s", m.pageHints())
+	}
+
+	// esc ends the stroke but keeps the marks.
+	m = press(m, "esc")
+	if m.visual || len(m.selection) != 3 {
+		t.Fatalf("esc must keep the set: visual=%v selection=%v", m.visual, m.selection)
+	}
+	if !strings.Contains(m.pageHints(), "3 selected") {
+		t.Fatalf("hints must announce leftover marks:\n%s", m.pageHints())
+	}
+
+	// Moving with no stroke marks nothing; a second stroke elsewhere grows
+	// the set into a scattered one.
+	if m = press(m, "j"); len(m.selection) != 3 {
+		t.Fatalf("moving without a stroke must not mark: %v", m.selection)
+	}
+	m = press(m, "j", "v", "esc") // skip row 3, mark row 4
+	if len(m.selection) != 4 || m.selection[3] || !m.selection[4] {
+		t.Fatalf("scattered set wrong: %v", m.selection)
+	}
+
+	// x unmarks the cursor row and ends the stroke: the span could not be
+	// trusted around a hand-edit. j/k afterwards marks nothing until a new
+	// v stroke starts.
+	m = press(m, "k", "v", "x") // up onto 3, mark it, unmark it again
+	if m.selection[3] || m.visual {
+		t.Fatalf("x must unmark the cursor row and end the stroke: %v visual=%v", m.selection, m.visual)
+	}
+	m = press(m, "j")
+	if len(m.selection) != 4 {
+		t.Fatalf("moving after x must keep the set as it was: %v", m.selection)
+	}
+
+	// X unmarks everything and ends the stroke.
+	m = press(m, "X")
+	if len(m.selection) != 0 || m.visual {
+		t.Fatalf("X must clear the set: %v visual=%v", m.selection, m.visual)
+	}
+
+	// An empty queue never starts a stroke.
+	empty := NewModel(Options{Jobs: 1})
+	empty = press(empty, "v")
+	if empty.visual || len(empty.selection) != 0 {
+		t.Fatal("v on an empty queue must be inert")
+	}
+
+	// Tab switching ends the stroke and updates... the set survives.
+	m = visualBlockModel("a.mkv", "b.mkv")
+	m = press(m, "v", "2")
+	if m.visual || len(m.selection) != 1 {
+		t.Fatalf("tab switch must end the stroke but keep the set: visual=%v sel=%v", m.visual, m.selection)
+	}
+}
+
+// sortedMarks collects the selection's row IDs in order for comparisons.
+func sortedMarks(m Model) []int {
+	ids := make([]int, 0, len(m.selection))
+	for id := range m.selection {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	return ids
+}
+
+func TestVisualStrokeRetractsLikeVim(t *testing.T) {
+	m := visualBlockModel(
+		"1.mkv", "2.mkv", "3.mkv", "4.mkv", "5.mkv", "6.mkv", "7.mkv", "8.mkv",
+	)
+
+	// Stroke from item 6 up to item 4: it covers 4..6 ...
+	m = press(m, "j", "j", "j", "j", "j", "v", "k", "k")
+	if got := sortedMarks(m); fmt.Sprint(got) != "[3 4 5]" {
+		t.Fatalf("stroke 6→4 marked = %v, want [3 4 5]", got)
+	}
+
+	// ... then back down past 6 to 8. Vim semantics: only 6..8 stay
+	// marked; the stroke retracts over its own work.
+	m = press(m, "j", "j", "j", "j")
+	if got := sortedMarks(m); fmt.Sprint(got) != "[5 6 7]" {
+		t.Fatalf("stroke 6→4→8 marked = %v, want [5 6 7] only", got)
+	}
+	if !m.visual {
+		t.Fatal("the stroke must survive retraction")
+	}
+}
+
+func TestVisualRetractionKeepsEarlierStrokes(t *testing.T) {
+	m := visualBlockModel(
+		"1.mkv", "2.mkv", "3.mkv", "4.mkv", "5.mkv", "6.mkv", "7.mkv", "8.mkv",
+	)
+
+	// Item 1 is marked by an earlier stroke and the stroke is over.
+	m = press(m, "v", "esc")
+	// Now a second stroke: 6 → 4 → 8.
+	m = press(m, "j", "j", "j", "j", "j", "v", "k", "k", "j", "j", "j", "j")
+	// The retraction reverted only the second stroke's work; item 1 kept
+	// its mark from the earlier stroke.
+	if got := sortedMarks(m); fmt.Sprint(got) != "[0 5 6 7]" {
+		t.Fatalf("marks after retraction = %v, want [0 5 6 7]", got)
+	}
+}
+
+func TestVisualModeChip(t *testing.T) {
+	m := visualBlockModel("a.mkv", "b.mkv", "c.mkv")
+
+	// Normal mode shows the muted chip.
+	if chip := m.modeChip(); !strings.Contains(stripANSI(chip), "NORMAL") {
+		t.Fatalf("mode chip = %q, want NORMAL", stripANSI(chip))
+	}
+	if !strings.Contains(stripANSI(m.View()), "NORMAL") {
+		t.Fatal("NORMAL chip missing from the board view")
+	}
+	// Other tabs have no modes.
+	m = press(m, "2")
+	if strings.Contains(stripANSI(m.View()), "NORMAL") {
+		t.Fatal("the completed tab must not show a mode chip")
+	}
+
+	// A stroke flips the chip to VISUAL and counts the marks.
+	m = press(m, "1", "v", "j")
+	if chip := stripANSI(m.modeChip()); !strings.Contains(chip, "VISUAL") ||
+		!strings.Contains(chip, "2 marked") {
+		t.Fatalf("stroke chip = %q, want VISUAL with 2 marked", chip)
+	}
+}
+
+func TestBoardStartSelectedKey(t *testing.T) {
+	type hit struct {
+		id     int
+		action ControlAction
+	}
+	var got []hit
+	m := NewModel(Options{
+		QueueURLs: []string{
+			"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv",
+			"https://x/d.mkv", "https://x/e.mkv",
+		},
+		Jobs:      1,
+		OnControl: func(id int, action ControlAction) { got = append(got, hit{id, action}) },
+	})
+
+	// Mixed statuses: b is already running, c paused, d failed, e cancelled.
+	m = update(m, FileStartedMsg{ID: 1, Row: newRow(1, "b.mkv", 10, 0)})
+	m = update(m, JobStateMsg{ID: 2, State: RowPaused})
+	m = update(m, JobStateMsg{ID: 3, State: RowFailed})
+	m = update(m, JobStateMsg{ID: 4, State: RowCancelled})
+
+	// First stroke marks a(0); a second one marks c..e, leaving running b
+	// un-cluttered? untouched. Two strokes into one scattered set.
+	m = press(m, "v", "esc", "j", "j", "v", "j", "j", "S")
+	want := []hit{
+		{0, ControlStart},
+		{2, ControlResume},
+		{3, ControlRetry},
+		{4, ControlRetry},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("S on the set = %v, want %v (start/resume/retry, running skipped)", got, want)
+	}
+
+	// The same key outside a stroke acts on whatever survives of the set.
+	m = press(m, "esc", "X", "k", "k", "k", "k", "v", "S")
+	if len(got) != 5 {
+		t.Fatalf("S must act on a set of one, got %v", got)
+	}
+	if got[4] != (hit{0, ControlStart}) {
+		t.Fatalf("the last control = %v, want start on the only marked row", got[4])
+	}
+
+	// No marks: S is inert.
+	got = got[:0]
+	m = press(m, "X", "S")
+	if len(got) != 0 {
+		t.Fatalf("S with no marks must be inert, got %v", got)
+	}
+}
+
+func TestBoardStrokeSTogglesSelected(t *testing.T) {
+	type hit struct {
+		id     int
+		action ControlAction
+	}
+	var got []hit
+	m := NewModel(Options{
+		QueueURLs: []string{
+			"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv",
+			"https://x/d.mkv",
+		},
+		Jobs:      1,
+		OnControl: func(id int, action ControlAction) { got = append(got, hit{id, action}) },
+	})
+
+	// Just to prove s is scoped: d is running, so the old s would have
+	// sent a global stop-all instead.
+	m = update(m, FileStartedMsg{ID: 3, Row: newRow(3, "d.mkv", 10, 0)})
+
+	// Stroke over a first, then over c — b sits unmarked between them, and
+	// running d is never marked. Pressing s inside the second stroke must
+	// start exactly the marked pair: no global start-all (the engine id -1
+	// never fires), no touching of b or d.
+	m = press(m, "v", "esc", "j", "j", "v", "s")
+	want := []hit{
+		{0, ControlStart},
+		{2, ControlStart},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("s in a stroke = %v, want %v (marked only, no global toggle)", got, want)
+	}
+
+	// The toggle's stop side: mark just the running d and press s again —
+	// the per-row mapping pauses it, while a global stop-all would have
+	// taken the whole run down and reset the clock.
+	got = nil
+	m = press(m, "esc", "X", "j", "v", "s")
+	if fmt.Sprint(got) != fmt.Sprint([]hit{{3, ControlPause}}) {
+		t.Fatalf("s on a marked running row = %v, want pause on d", got)
+	}
+}
+
+func TestVisualSelectionBlockMovesDownUp(t *testing.T) {
+	var order []int
+	m := visualBlockModel("a.mkv", "b.mkv", "c.mkv", "d.mkv")
+	m.opts.OnReorder = func(ids []int) { order = ids }
+
+	// Select rows a..c and move the block down one visible row.
+	m = press(m, "v", "j", "j", "J")
+	if fmt.Sprint(order) != "[3 0 1 2]" {
+		t.Fatalf("block down = %v, want [3 0 1 2]", order)
+	}
+	if m.selected != 3 {
+		t.Fatalf("cursor = %d, want 3 (the block's tail)", m.selected)
+	}
+	if p0, p1, ok := m.selectionRun(); !ok || p0 != 1 || p1 != 3 {
+		t.Fatalf("block span (%d,%d) got lost moving down", p0, p1)
+	}
+	if !m.visual {
+		t.Fatal("the stroke must survive a block move")
+	}
+
+	// K walks the block back up, landing it where it started.
+	m = press(m, "K")
+	if fmt.Sprint(order) != "[0 1 2 3]" {
+		t.Fatalf("block up = %v, want [0 1 2 3]", order)
+	}
+	if m.selected != 2 || !m.visual {
+		t.Fatalf("cursor = %d, visual = %v, want 2 and true", m.selected, m.visual)
+	}
+
+	// At an edge the block cannot move: no reorder is persisted.
+	before := len(order)
+	_ = press(m, "K")
+	if len(order) != before {
+		t.Fatalf("K at the top must not rewrite the queue: %v", order)
+	}
+}
+
+func TestVisualOneMarkedRowMovesLikeSingle(t *testing.T) {
+	var order []int
+	m := visualBlockModel("a.mkv", "b.mkv", "c.mkv")
+	m.opts.OnReorder = func(ids []int) { order = ids }
+
+	m = press(m, "j", "v") // mark b only, stroke stays on
+	if len(m.selection) != 1 || !m.selection[1] {
+		t.Fatalf("setup: %v", m.selection)
+	}
+	m = press(m, "K") // swap with a, like the plain single-row move
+	if fmt.Sprint(order) != "[1 0 2]" {
+		t.Fatalf("single marked row = %v, want [1 0 2]", order)
+	}
+	if m.selected != 0 {
+		t.Fatalf("cursor = %d, want 0", m.selected)
+	}
+}
+
+func TestVisualSelectionBlockToEdge(t *testing.T) {
+	var order []int
+	m := visualBlockModel("a.mkv", "b.mkv", "c.mkv", "d.mkv")
+	m.opts.OnReorder = func(ids []int) { order = ids }
+
+	// Block a..c drops to the bottom in one G, and comes back with g.
+	m = press(m, "v", "j", "j", "G")
+	if fmt.Sprint(order) != "[3 0 1 2]" {
+		t.Fatalf("block to bottom = %v, want [3 0 1 2]", order)
+	}
+	m = press(m, "g")
+	if fmt.Sprint(order) != "[0 1 2 3]" {
+		t.Fatalf("block to top = %v, want [0 1 2 3]", order)
+	}
+
+	// Already spanning that edge: no rewrite.
+	before := len(order)
+	_ = press(m, "g", "K", "G")
+	if len(order) != before {
+		t.Fatalf("edge-blocked moves must not persist: %v", order)
+	}
+}
+
+func TestVisualScatteredMovesWarnAndDoNothing(t *testing.T) {
+	var order []int
+	m := visualBlockModel("a.mkv", "b.mkv", "c.mkv", "d.mkv", "e.mkv")
+	m.opts.OnReorder = func(ids []int) { order = ids }
+
+	// Mark a(0) and c(2), leaving a gap at b(1). The second stroke stays
+	// on: the move keys only act on the set while a stroke is active.
+	m = press(m, "v", "esc", "j", "j", "v")
+	if len(m.selection) != 2 || !m.selection[0] || !m.selection[2] {
+		t.Fatalf("setup: scattered set missing: %v", m.selection)
+	}
+
+	warns := len(m.warnings)
+	m = press(m, "J")
+	if len(order) != 0 {
+		t.Fatalf("a scattered set must not be moved: %v", order)
+	}
+	if len(m.warnings) != warns+1 {
+		t.Fatalf("J on a scattered set must warn, got %v", m.warnings)
+	}
+	m = press(m, "g")
+	if len(order) != 0 {
+		t.Fatalf("a scattered set must not be moved to an edge: %v", order)
+	}
+
+	// Clearing the set brings the run back: mark c..e contiguously and the
+	// block moves again.
+	m = press(m, "X", "v", "j", "j", "K")
+	if fmt.Sprint(order) != "[0 2 3 4 1]" {
+		t.Fatalf("contiguous block move = %v, want [0 2 3 4 1]", order)
+	}
+}
+
+func TestVisualSpaceStartsAndPausesEveryRow(t *testing.T) {
+	type hit struct {
+		id     int
+		action ControlAction
+	}
+	var got []hit
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv"},
+		Jobs:      1,
+		OnControl: func(id int, action ControlAction) { got = append(got, hit{id, action}) },
+	})
+
+	// Make the statuses mixed: b is running, c is paused, a stays held.
+	m = update(m, FileStartedMsg{ID: 1, Row: newRow(1, "b.mkv", 10, 0)})
+	m = update(m, JobStateMsg{ID: 2, State: RowPaused})
+
+	m = press(m, "v", "j", "j", " ")
+	want := []hit{
+		{0, ControlStart},
+		{1, ControlPause},
+		{2, ControlResume},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("space on the block = %v, want %v (per-row mapping)", got, want)
+	}
+}
+
+func TestVisualSelectionDeleteAsksOnce(t *testing.T) {
+	var deleted []int
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv", "https://x/d.mkv"},
+		Jobs:      1,
+		OnDelete:  func(id int) { deleted = append(deleted, id) },
+	})
+
+	m = press(m, "v", "j", "d")
+	if m.confirm == nil {
+		t.Fatal("deleting the selection must ask for confirmation first")
+	}
+	if prompt := m.confirm.Prompt; !strings.Contains(prompt, "Remove 2 files") {
+		t.Fatalf("prompt = %q, want the selection size in words", prompt)
+	}
+
+	// Cancelling keeps every row and the selection.
+	m = press(m, "n")
+	if len(m.rows) != 4 || m.confirm != nil {
+		t.Fatalf("cancel must keep the rows: rows=%d confirm=%v", len(m.rows), m.confirm)
+	}
+
+	// Confirming removes the whole selection in one go and ends the stroke.
+	m = press(m, "d", "y")
+	if fmt.Sprint(deleted) != "[0 1]" {
+		t.Fatalf("deleted ids = %v, want [0 1]", deleted)
+	}
+	if len(m.rows) != 2 || m.visual || len(m.selection) != 0 {
+		t.Fatalf("rows=%d visual=%v selection=%v: the block must be gone",
+			len(m.rows), m.visual, m.selection)
+	}
+	plain := stripANSI(m.View())
+	if strings.Contains(plain, "a.mkv") || strings.Contains(plain, "b.mkv") {
+		t.Errorf("deleted rows still rendered:\n%s", plain)
+	}
+	if m.selected != 1 || !strings.Contains(plain, "d.mkv") {
+		t.Errorf("cursor = %d, want to stay on d.mkv:\n%s", m.selected, plain)
+	}
+}
+
+func TestVisualSelectionDeleteScatteredSet(t *testing.T) {
+	var deleted []int
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv", "https://x/c.mkv", "https://x/d.mkv"},
+		Jobs:      1,
+		OnDelete:  func(id int) { deleted = append(deleted, id) },
+	})
+
+	// Deletion covers the whole set even when it is scattered: mark a and
+	// c, keep the stroke on, delete.
+	m = press(m, "v", "esc", "j", "j", "v", "d")
+	if m.confirm == nil {
+		t.Fatal("deleting a scattered set must ask first")
+	}
+	if prompt := m.confirm.Prompt; !strings.Contains(prompt, "Remove 2 files") {
+		t.Fatalf("prompt = %q, want 2 files", prompt)
+	}
+	m = press(m, "y")
+	if fmt.Sprint(deleted) != "[0 2]" {
+		t.Fatalf("deleted ids = %v, want [0 2]", deleted)
+	}
+	if len(m.rows) != 2 || len(m.selection) != 0 {
+		t.Fatalf("rows=%d selection=%v: only the marked rows may go", len(m.rows), m.selection)
+	}
+	plain := stripANSI(m.View())
+	if strings.Contains(plain, "a.mkv") || strings.Contains(plain, "c.mkv") {
+		t.Errorf("only the marked rows should be gone:\n%s", plain)
+	}
+}
+
+func TestVisualSelectionFilteredRowsOnly(t *testing.T) {
+	var order []int
+	m := visualBlockModel(
+		"keep-1.mkv", "x-1.mkv", "keep-2.mkv", "x-2.mkv", "keep-3.mkv", "keep-4.mkv",
+	)
+	m.opts.OnReorder = func(ids []int) { order = ids }
+
+	// The filter shows rows 0, 2, 4, 5 (keep-1..keep-4). A run over the
+	// first two behaves like one line: it jumps down past keep-3/keep-4,
+	// hidden rows keep their slots, and a K at the visible edge is inert.
+	m = press(m, "/", "k", "e", "e", "p", "enter", "v", "j", "G")
+	if fmt.Sprint(order) != "[3 4 5 0 1 2]" {
+		t.Fatalf("block to visible bottom = %v, want [3 4 5 0 1 2]", order)
+	}
+	p0, p1, ok := m.selectionRun()
+	if !ok || p0 != 2 || p1 != 3 {
+		t.Fatalf("block span = (%d,%d) ok=%v, want the bottom of the visible list", p0, p1, ok)
+	}
+
+	m = press(m, "g")
+	if fmt.Sprint(order) != "[3 0 1 2 4 5]" {
+		t.Fatalf("block back to visible top = %v, want [3 0 1 2 4 5]", order)
+	}
+
+	// No visible row above the block: K cannot move it.
+	before := len(order)
+	_ = press(m, "K")
+	if len(order) != before {
+		t.Fatalf("K at the visible top edge must not persist: %v", order)
 	}
 }
 

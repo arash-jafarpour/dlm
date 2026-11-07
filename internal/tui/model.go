@@ -231,6 +231,19 @@ type Model struct {
 	spin         int  // advances on every tick; drives the starting spinner
 	help         bool // help overlay visible
 
+	// Selection set: marked row IDs, kept between strokes so separate
+	// v strokes can build a scattered selection. While a stroke is on
+	// (visual), marks are vim visual-mode semantics: the span between the
+	// stroke's anchor and the cursor is marked, and the rest of the visible
+	// list is put back to the pre-stroke snapshot, so retracing over your
+	// own stroke unmarks it again.
+	selection map[int]bool
+	visual    bool
+	// vAnchor is the stroke anchor's row ID; vPre is the selection as it
+	// was when the stroke started.
+	vAnchor int
+	vPre    map[int]bool
+
 	// Per-page cursors: each tab owns its selection so keys never act on
 	// another page's rows.
 	selCompleted    int
@@ -462,7 +475,7 @@ func clampInt(v, lo, hi int) int {
 }
 
 func NewModel(opts Options) Model {
-	m := Model{opts: opts, width: 100, height: 30}
+	m := Model{opts: opts, selection: map[int]bool{}, vPre: map[int]bool{}, width: 100, height: 30}
 	// Every queued file is visible from the start, in queue order: the
 	// board is the queue. queue_jobs decides which rows go live.
 	for i, u := range opts.QueueURLs {
@@ -791,12 +804,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "esc":
-		// With a filter applied, esc clears it first; the next esc quits.
+		// Visual mode ends first, then a filter clears, then the app quits.
+		if m.visual {
+			m.endStroke()
+			return m, nil
+		}
 		if m.clearFilter() {
 			return m, nil
 		}
 		return m, tea.Quit
 	case "/":
+		m.visual = false // anchors do not survive a filter being narrowed
 		m.openFilter()
 		return m, nil
 	case "?":
@@ -805,12 +823,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "u":
 		return m, m.confirmUpdate()
 	case "tab", "right", "l":
+		m.visual = false
 		m.tab = (m.tab + 1) % Tab(len(tabNames))
 		return m, m.refreshSummary()
 	case "shift+tab", "left", "h":
+		m.visual = false
 		m.tab = (m.tab + Tab(len(tabNames)) - 1) % Tab(len(tabNames))
 		return m, m.refreshSummary()
 	case "1", "2", "3", "4":
+		m.visual = false
 		m.tab = Tab(msg.String()[0] - '1')
 		return m, m.refreshSummary()
 	}
@@ -853,20 +874,49 @@ func (m *Model) handleDownloadsKey(msg tea.KeyMsg) tea.Cmd {
 		m.moveSelection(1)
 	case "up", "k":
 		m.moveSelection(-1)
+	case "v":
+		m.beginVisual()
+	case "x":
+		m.deselectCursor()
+	case "X":
+		m.clearSelection()
+	case "c":
+		m.controlSelected(func(*Row) ControlAction { return ControlCancel })
 	case "a":
 		m.inputActive = true
 		m.input = ""
 		m.inputKey = ""
+		m.visual = false
 	case "d":
-		m.confirmDeleteSelected()
+		if m.visual {
+			m.confirmDeleteSelection()
+		} else {
+			m.confirmDeleteSelected()
+		}
 	case "J":
-		m.moveSelected(1)
+		if m.visual {
+			m.moveSelectionBlock(1)
+		} else {
+			m.moveSelected(1)
+		}
 	case "K":
-		m.moveSelected(-1)
+		if m.visual {
+			m.moveSelectionBlock(-1)
+		} else {
+			m.moveSelected(-1)
+		}
 	case "g", "ctrl+up":
-		m.moveSelectedToEdge(true)
+		if m.visual {
+			m.moveSelectionBlockToEdge(true)
+		} else {
+			m.moveSelectedToEdge(true)
+		}
 	case "G", "ctrl+down":
-		m.moveSelectedToEdge(false)
+		if m.visual {
+			m.moveSelectionBlockToEdge(false)
+		} else {
+			m.moveSelectedToEdge(false)
+		}
 	case "R":
 		m.retryAllFailed()
 	case "o":
@@ -880,8 +930,18 @@ func (m *Model) handleDownloadsKey(msg tea.KeyMsg) tea.Cmd {
 			return m.opts.OnOpenDir()
 		}
 	case " ":
-		m.toggleSelected()
+		if m.visual {
+			m.toggleSelection()
+		} else {
+			m.toggleSelected()
+		}
 	case "s":
+		if m.visual {
+			// A stroke is active: s toggles the marked rows instead of
+			// the whole queue — the same per-row mapping space applies.
+			m.toggleSelection()
+			return nil
+		}
 		if m.opts.OnControl != nil {
 			// Toggle: with anything active, s stops the whole run and
 			// returns started files to the held state; otherwise it
@@ -897,8 +957,8 @@ func (m *Model) handleDownloadsKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	case "r":
 		m.controlSelected(func(*Row) ControlAction { return ControlRetry })
-	case "x":
-		m.controlSelected(func(*Row) ControlAction { return ControlCancel })
+	case "S":
+		m.startSelection()
 	}
 	return nil
 }
@@ -1603,6 +1663,7 @@ func (m *Model) confirmDeleteSelected() {
 		Prompt: fmt.Sprintf("Remove from the queue?  %s", truncateDisplay(row.Label, 48)),
 		OnYes: func(cur *Model) {
 			cur.opts.OnDelete(row.ID)
+			delete(cur.selection, row.ID)
 			cur.rows = append(cur.rows[:idx], cur.rows[idx+1:]...)
 			if cur.selected >= len(cur.rows) && cur.selected > 0 {
 				cur.selected--
@@ -1732,6 +1793,10 @@ func (m *Model) moveSelection(delta int) {
 	}
 	m.selected = vis[pos]
 	m.ensureSelectionVisible()
+	// A select stroke is on: the span between the stroke's anchor and the
+	// cursor wraps the selection, so extending marks the crossed rows and
+	// retracing unmarks the stroke's own work.
+	m.applyStroke()
 }
 
 // ensureSelectionVisible scrolls the window so the selected row is inside
@@ -1779,6 +1844,23 @@ func (m *Model) controlSelected(action func(row *Row) ControlAction) {
 	m.opts.OnControl(row.ID, action(row))
 }
 
+// controlActionFor maps a row's status to the space/click action. False
+// means the row has nothing to start or stop.
+func controlActionFor(row *Row) (ControlAction, bool) {
+	switch row.Status {
+	case RowPaused:
+		return ControlResume, true
+	case RowQueued:
+		return ControlStart, true
+	case RowFailed, RowCancelled:
+		return ControlRetry, true
+	case RowRunning, RowStarting:
+		return ControlPause, true
+	default: // RowSaved
+		return 0, false
+	}
+}
+
 // toggleSelected is the space/click action: start a held file, pause a
 // transfer (including one still starting), resume a paused one, retry a
 // failed or cancelled one. A saved row has nothing to start or stop.
@@ -1787,20 +1869,330 @@ func (m *Model) toggleSelected() {
 	if !ok || m.opts.OnControl == nil {
 		return
 	}
-	var action ControlAction
-	switch row.Status {
-	case RowPaused:
-		action = ControlResume
-	case RowQueued:
-		action = ControlStart
-	case RowFailed, RowCancelled:
-		action = ControlRetry
-	case RowRunning, RowStarting:
-		action = ControlPause
-	default: // RowSaved
+	action, ok := controlActionFor(row)
+	if !ok {
 		return
 	}
 	m.opts.OnControl(row.ID, action)
+}
+
+// anchorPos resolves the stroke anchor's current row slot, -1 when the row
+// is gone (a delete or an external edit removed it).
+func (m Model) anchorPos() int {
+	for i, r := range m.rows {
+		if r.ID == m.vAnchor {
+			return i
+		}
+	}
+	return -1
+}
+
+// beginVisual starts a select stroke: the current selection is snapshotted
+// (so the span application can restore rows outside the span to it), the
+// cursor row is anchored and marked, and rows between the anchor and the
+// now-moving cursor join the selection. Pressing v again while a stroke is
+// on re-anchors under the cursor.
+func (m *Model) beginVisual() {
+	if row, ok := m.selectedRow(); ok {
+		m.vPre = map[int]bool{}
+		for id := range m.selection {
+			m.vPre[id] = true
+		}
+		m.vAnchor = row.ID
+		m.selection[row.ID] = true
+		m.visual = true
+	}
+}
+
+// applyStroke wraps the selection around the stroke span: rows between the
+// anchor and the cursor are marked, and every other visible row goes back
+// to its pre-stroke state. That is vim's visual-mode behavior — extending
+// marks the rows crossed, and retracing over this stroke unmarks them
+// again — while marks from earlier strokes, which were outside this span
+// all along, survive untouched.
+func (m *Model) applyStroke() {
+	if !m.visual {
+		return
+	}
+	vis := m.visibleRows()
+	lo := visiblePos(vis, m.anchorPos())
+	hi := visiblePos(vis, m.selected)
+	if lo < 0 || hi < 0 {
+		// The anchor or cursor left the visible list (the queue changed):
+		// the stroke cannot describe a span any more.
+		m.endStroke()
+		return
+	}
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	for pos, i := range vis {
+		id := m.rows[i].ID
+		switch {
+		case pos >= lo && pos <= hi:
+			m.selection[id] = true
+		case m.vPre[id]:
+			m.selection[id] = true
+		default:
+			delete(m.selection, id)
+		}
+	}
+}
+
+// endStroke stops marking and drops the stroke snapshot; the set keeps
+// whatever the span last left.
+func (m *Model) endStroke() {
+	m.visual = false
+	m.vPre = map[int]bool{}
+}
+
+// deselectCursor unmarks the row under the cursor. Inside a stroke the span
+// would instantly re-mark the row, so the stroke ends first: hand-editing
+// the set is a normal-mode gesture.
+func (m *Model) deselectCursor() {
+	m.endStroke()
+	if row, ok := m.selectedRow(); ok {
+		delete(m.selection, row.ID)
+	}
+}
+
+// clearSelection unmarks everything and ends any stroke.
+func (m *Model) clearSelection() {
+	m.selection = map[int]bool{}
+	m.endStroke()
+}
+
+// selectionRun returns the first and last visible-list positions covered by
+// the selection while the marked-and-visible rows form exactly one
+// contiguous run. Ok is false when the selection is empty, scattered in the
+// visible list, or nothing passes the filter — the move keys treat scattered
+// runs as "do nothing" instead of dragging invisible corners around.
+func (m Model) selectionRun() (p0, p1 int, ok bool) {
+	count := 0
+	for pos, i := range m.visibleRows() {
+		if !m.selection[m.rows[i].ID] {
+			continue
+		}
+		if count > 0 && p1 != pos-1 {
+			return 0, 0, false // gap: two separate runs
+		}
+		if count == 0 {
+			p0 = pos
+		}
+		p1 = pos
+		count++
+	}
+	return p0, p1, count > 0
+}
+
+// selectionIDs returns the IDs of the selected rows that pass the current
+// filter, in display order: an action must never touch a row the user
+// cannot see.
+func (m Model) selectionIDs() []int {
+	vis := m.visibleRows()
+	ids := make([]int, 0, len(m.selection))
+	for _, i := range vis {
+		if m.selection[m.rows[i].ID] {
+			ids = append(ids, m.rows[i].ID)
+		}
+	}
+	return ids
+}
+
+// moveSelectionBlock shifts the whole selection one visible row down
+// (delta 1) or up (-1). It requires the selection to be one contiguous run;
+// anything else warns and does nothing, so a stray mark never gets dragged
+// halfway across the queue. Within the block every row swaps with the
+// neighboring visible row in turn: the block jumps past filter-hidden rows
+// and the hidden rows themselves never move — the same policy the
+// single-row move follows.
+func (m *Model) moveSelectionBlock(delta int) {
+	if m.opts.OnReorder == nil || len(m.rows) < 2 {
+		return
+	}
+	vis := m.visibleRows()
+	p0, p1, ok := m.selectionRun()
+	if !ok {
+		if len(m.selection) > 0 {
+			m.warn("The selection is scattered — J/K moves one contiguous block of selected files")
+		}
+		return
+	}
+	var target int
+	if delta > 0 {
+		if p1+1 >= len(vis) {
+			return
+		}
+		target = vis[p1+1]
+	} else {
+		if p0 == 0 {
+			return
+		}
+		target = vis[p0-1]
+	}
+	// The neighbor row hops across the block into its old head slot while
+	// every block row drops one slot: swap from the block's far end toward
+	// the neighbor.
+	cursor := m.rows[m.selected]
+	if delta > 0 {
+		for j := p1; j >= p0; j-- {
+			m.rows[vis[j]], m.rows[target] = m.rows[target], m.rows[vis[j]]
+			target = vis[j]
+		}
+	} else {
+		for j := p0; j <= p1; j++ {
+			m.rows[vis[j]], m.rows[target] = m.rows[target], m.rows[vis[j]]
+			target = vis[j]
+		}
+	}
+	// The cursor never jumps out of the block; find where its row landed
+	// so the view scrolls with it.
+	for i, r := range m.rows {
+		if r == cursor {
+			m.selected = i
+			break
+		}
+	}
+	m.ensureSelectionVisible()
+	m.persistOrder()
+}
+
+// moveSelectionBlockToEdge moves the selection to the top or bottom of the
+// visible list, keeping every other row's relative order. It requires the
+// selection to be one contiguous run (warns otherwise). When the run already
+// fills that edge, nothing changes. Filter-hidden rows enclosed by the run
+// travel with it; hidden rows outside stay put, matching the single-row edge
+// move.
+func (m *Model) moveSelectionBlockToEdge(toTop bool) {
+	if m.opts.OnReorder == nil || len(m.rows) < 2 {
+		return
+	}
+	vis := m.visibleRows()
+	p0, p1, ok := m.selectionRun()
+	if !ok {
+		if len(m.selection) > 0 {
+			m.warn("The selection is scattered — g/G moves one contiguous block of selected files")
+		}
+		return
+	}
+	if (toTop && p0 == 0) || (!toTop && p1 == len(vis)-1) {
+		return // the block already fills that edge
+	}
+	// Lift the contiguous range the visible block covers (its rows plus any
+	// hidden ones enclosed by it) out of the list, then slot it in before
+	// the first / after the last row that remains visible.
+	head, tail := vis[p0], vis[p1]
+	cursor := m.rows[m.selected]
+	n := tail - head + 1
+	rest := make([]*Row, 0, len(m.rows)-n)
+	rest = append(rest, m.rows[:head]...)
+	rest = append(rest, m.rows[tail+1:]...)
+	boundary := vis[0] // top: right before the first remaining visible row
+	if !toTop {
+		boundary = vis[len(vis)-1] + 1 // bottom: right after the last one
+	}
+	target := boundary // top: the block rows all sat below this edge
+	if !toTop {
+		target = boundary - n // bottom: fold the block rows out of the slot
+	}
+	rows := make([]*Row, 0, len(m.rows))
+	rows = append(rows, rest[:target]...)
+	rows = append(rows, m.rows[head:tail+1]...)
+	rows = append(rows, rest[target:]...)
+	m.rows = rows
+	for i, r := range m.rows {
+		if r == cursor {
+			m.selected = i
+			break
+		}
+	}
+	m.ensureSelectionVisible()
+	m.persistOrder()
+}
+
+// startSelection is the S action: make every marked row that answers to it
+// go — queued starts, paused resumes, failed and cancelled retry. Running
+// rows are left alone (already going, and "start" must never pause), and a
+// saved row has nothing to start. Rows hidden by the filter are skipped.
+func (m *Model) startSelection() {
+	if m.opts.OnControl == nil {
+		return
+	}
+	vis := m.visibleRows()
+	for _, i := range vis {
+		if !m.selection[m.rows[i].ID] {
+			continue
+		}
+		var action ControlAction
+		switch m.rows[i].Status {
+		case RowQueued:
+			action = ControlStart
+		case RowPaused:
+			action = ControlResume
+		case RowFailed, RowCancelled:
+			action = ControlRetry
+		default: // Running/starting already transfer; saved has no transfer.
+			continue
+		}
+		m.opts.OnControl(m.rows[i].ID, action)
+	}
+}
+
+// toggleSelection applies the space mapping to every selected row that
+// passes the current filter: each pauses, resumes, starts or retries on its
+// own merits. A saved row has nothing to start or stop and is skipped.
+func (m *Model) toggleSelection() {
+	if m.opts.OnControl == nil {
+		return
+	}
+	vis := m.visibleRows()
+	for _, i := range vis {
+		if !m.selection[m.rows[i].ID] {
+			continue
+		}
+		action, ok := controlActionFor(m.rows[i])
+		if !ok {
+			continue
+		}
+		m.opts.OnControl(m.rows[i].ID, action)
+	}
+}
+
+// confirmDeleteSelection asks once before removing every selected row that
+// passes the current filter; accepting drops them all and ends the stroke.
+func (m *Model) confirmDeleteSelection() {
+	if m.opts.OnDelete == nil {
+		return
+	}
+	ids := m.selectionIDs()
+	if len(ids) == 0 {
+		return
+	}
+	gone := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		gone[id] = true
+	}
+	m.confirm = &confirmPrompt{
+		Prompt: fmt.Sprintf("Remove %d files from the queue?", len(ids)),
+		OnYes: func(cur *Model) {
+			for _, id := range ids {
+				cur.opts.OnDelete(id)
+				delete(cur.selection, id)
+			}
+			kept := make([]*Row, 0, len(cur.rows)-len(ids))
+			for _, r := range cur.rows {
+				if !gone[r.ID] {
+					kept = append(kept, r)
+				}
+			}
+			cur.rows = kept
+			cur.visual = false
+			if cur.selected >= len(cur.rows) {
+				cur.selected = maxInt(0, len(cur.rows)-1)
+			}
+			cur.clampSelectionToVisible()
+		},
+	}
 }
 
 func (m Model) rowByID(id int) *Row {
@@ -1876,6 +2268,19 @@ func (m Model) View() string {
 
 // viewBottom renders the bottom chrome: transient warnings, the rule, then
 // either the modal/input lines or the status, key hints, and footer.
+// modeChip is the lualine-like mode segment leading the downloads status
+// line: the mode the keys are in right now. During a stroke it also counts
+// the rows marked so a drag is never invisible.
+func (m Model) modeChip() string {
+	if m.tab != TabDownloads {
+		return "" // the other tabs have no modes
+	}
+	if m.visual {
+		return StyleModeVisual.Render(fmt.Sprintf(" VISUAL · %d marked ", len(m.selectionIDs())))
+	}
+	return StyleModeNormal.Render(" NORMAL ")
+}
+
 func (m Model) viewBottom() string {
 	var b strings.Builder
 
@@ -1913,6 +2318,11 @@ func (m Model) viewBottom() string {
 	saved, failed := m.counts()
 	// The summary panel is a snapshot, not a run view: it shows no status.
 	if m.tab != TabSummary {
+		// The mode chip leads the line where modes exist (downloads):
+		// NORMAL muted, VISUAL inverted blue with the marked count.
+		if chip := m.modeChip(); chip != "" {
+			b.WriteString(chip + " ")
+		}
 		if note := m.filterNote(); note != "" {
 			b.WriteString(StyleDim.Render(note) + " · ")
 		}
@@ -2001,8 +2411,19 @@ func (m Model) pageHints() string {
 		if m.activeCount() > 0 {
 			sKey = "s stop all"
 		}
+		if m.visual {
+			return "VISUAL select · j/k mark more rows · x deselect row · X clear all · d delete the set · s/S start/pause the set · space toggle row/rows · esc keep selection"
+		}
+		if n := len(m.selectionIDs()); n > 0 {
+			// With marks on screen, the set is the interesting part: S
+			// starts them, and the single-row keys say so explicitly.
+			return fmt.Sprintf(
+				"%d selected · S start them · s %s · r retry one · c cancel one · x deselect · X clear all · v stroke · d delete one · J/K g/G move",
+				n, sKey[2:],
+			)
+		}
 		return fmt.Sprintf(
-			"space start/pause · %s · r retry · R retry all · x cancel · a add · / filter · d delete · J/K g/G move",
+			"space start/pause · %s · r retry · c cancel · / filter · x deselect · v visual · d delete · J/K g/G move",
 			sKey,
 		)
 	}
@@ -2122,6 +2543,9 @@ func (m Model) viewDownloads() string {
 		i := vis[pos]
 		r := m.rows[i]
 		marker := "  "
+		if m.selection[r.ID] {
+			marker = StyleVisual.Render("▪ ")
+		}
 		if i == m.selected {
 			marker = StyleTabActive.Render("▸ ")
 		}
@@ -2402,6 +2826,13 @@ func (m *Model) applyReload(jobs []JobRef) {
 		rows = append(rows, row)
 	}
 	m.rows = rows
+	m.visual = false // the list was rebuilt: any stroke is stale
+	for id := range m.selection {
+		if _, ok := prev[id]; ok {
+			continue
+		}
+		delete(m.selection, id) // drop rows the queue edit removed
+	}
 	if m.selected >= len(m.rows) {
 		m.selected = maxInt(0, len(m.rows)-1)
 	}
@@ -2450,17 +2881,17 @@ func (m Model) viewHelp() string {
 		"",
 		StyleDim.Render("downloads"),
 		"  space      start the selected file / pause it / back to held",
-		"  s          start all (flowing: " + fmt.Sprint(m.opts.Jobs) + " at a time) · press again to stop all",
+		"  s/S        start all (flowing: " + fmt.Sprint(m.opts.Jobs) + " at a time) · s again stops all · in a stroke, s/S start/pause the marked files",
 		"  r          retry the selected file (failed, paused or cancelled)",
 		"  R          retry every failed file (ignores the filter)",
-		"  x          cancel the selected file",
+		"  c          cancel the selected file",
 		"  j/k        select (up/down scrolls the queue list)",
 		"",
 		StyleDim.Render("queue editing"),
 		"  a          add URLs (paste several, whitespace separated; enter adds)",
-		"  d          delete the selected file from the queue",
-		"  J/K        move the selected file down/up (changes flow order)",
-		"  g/G        move the selected file to the top/bottom (also ctrl+↑/↓)",
+		"  d          delete the selected file (visual: the whole block)",
+		"  J/K        move the selected file down/up · g/G to its top/bottom (also ctrl+↑/↓)",
+		"  v          visual select: j/k marks rows (esc keeps them) · x/X deselect one/all",
 		"  o          edit the queue file in $EDITOR (settings tab: the config)",
 		"",
 		StyleDim.Render("board"),
