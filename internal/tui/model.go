@@ -2412,7 +2412,7 @@ func (m Model) pageHints() string {
 			sKey = "s stop all"
 		}
 		if m.visual {
-			return "VISUAL select · j/k mark more rows · esc back to normal"
+			return "VISUAL select · j/k mark more rows · J/K g/G move selected · esc back to normal"
 		}
 		if n := len(m.selectionIDs()); n > 0 {
 			// With marks on screen, the set is the interesting part: S
