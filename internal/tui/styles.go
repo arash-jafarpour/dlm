@@ -18,7 +18,11 @@ var (
 	StyleBarEmpty    = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	StyleTabActive   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
 	StyleTabInactive = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	StyleStarting    = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	// StyleCursor recolors the neutral text on the row under the cursor so
+	// the cursor row never wears the same gray as the rows around it; the
+	// per-status colors (running bar, red failed, yellow paused) stay.
+	StyleCursor   = lipgloss.NewStyle().Foreground(lipgloss.Color("#bcbcbc"))
+	StyleStarting = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 	// StyleUpdate highlights the release notice above the version: bold, in
 	// the same blue as the other board highlights, so it cannot be mistaken
 	// for the dim status/hint/footer text it sits between.
@@ -36,8 +40,9 @@ var (
 // renderRow draws one live progress line, shaped like the plain-CLI rows so
 // the board feels like the same tool. Label and bar widths come from the
 // terminal layout; maxWidth (<=0 = unlimited) lets the ETA be dropped when
-// the line would not fit.
-func renderRow(r *Row, labelW, barW, maxWidth int) string {
+// the line would not fit. cursor makes the label wear the StyleCursor color
+// instead of the plain bold default, so the row under the cursor stands out.
+func renderRow(r *Row, labelW, barW, maxWidth int, cursor bool) string {
 	current := r.Current()
 	elapsed := time.Since(r.Start).Seconds()
 	var speed float64
@@ -83,8 +88,13 @@ func renderRow(r *Row, labelW, barW, maxWidth int) string {
 		}
 	}
 
+	labelStyle := StyleTitle
+	if cursor {
+		labelStyle = StyleCursor.Bold(true)
+	}
+
 	return fmt.Sprintf("%s %s %5.1f%%  %9s/%-9s %9s/s%s",
-		StyleTitle.Render(label), bar, percent,
+		labelStyle.Render(label), bar, percent,
 		humanBytes(current), humanBytes(r.Total), humanBytes(int64(speed)), eta)
 }
 

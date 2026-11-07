@@ -595,7 +595,7 @@ func TestBoardRowsFitTerminalWidth(t *testing.T) {
 		row.Start = time.Now().Add(-2 * time.Second)
 		row.Add(100)
 
-		line := renderRow(row, labelW, barW, width)
+		line := renderRow(row, labelW, barW, width, false)
 		if got := lipglossWidth(line) + 2; got > width { // +2 for "▸ "
 			t.Errorf("width %d: row is %d cells wide, overflows", width, got)
 		}
@@ -1462,7 +1462,7 @@ func TestBoardRowSpeedAndETA(t *testing.T) {
 	row.Start = time.Now().Add(-2 * time.Second) // 2s elapsed
 	row.Add(100)
 
-	line := renderRow(row, 26, 24, 0)
+	line := renderRow(row, 26, 24, 0, false)
 	if !strings.Contains(line, "/s") {
 		t.Errorf("speed missing: %s", line)
 	}
@@ -1473,8 +1473,43 @@ func TestBoardRowSpeedAndETA(t *testing.T) {
 	// Unknown size renders without percentage but stays a valid line.
 	unknown := newRow(0, "u.mkv", 0, 0)
 	unknown.Add(10)
-	if line := renderRow(unknown, 26, 24, 0); !strings.Contains(line, "u.mkv") {
+	if line := renderRow(unknown, 26, 24, 0, false); !strings.Contains(line, "u.mkv") {
 		t.Errorf("unknown-size row broken: %s", line)
+	}
+}
+
+// TestBoardCursorRowColor: the row under the cursor must not wear the same
+// gray as the rows around it. Downloads and completed tint their neutral
+// text with StyleCursor, and the per-status colors stay untouched. The
+// color profile is forced because test output is not a terminal.
+func TestBoardCursorRowColor(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	m := NewModel(Options{
+		QueueURLs: []string{"https://x/a.mkv", "https://x/b.mkv"},
+		Jobs:      1,
+	})
+
+	// Two held rows look identical apart from the cursor's tint.
+	view := m.View()
+	if !strings.Contains(view, StyleCursor.Render("· waiting for you  a.mkv")) {
+		t.Fatalf("cursor row must wear the cursor color:\n%s", view)
+	}
+	if strings.Contains(view, StyleCursor.Render("· waiting for you  b.mkv")) {
+		t.Fatalf("a row without the cursor must not wear the cursor color:\n%s", view)
+	}
+
+	// Completed: the entry under the cursor is tinted, the others stay plain.
+	m = press(m, "2")
+	m.opts.Completed = []HistoryEntry{{Text: "one.mkv"}, {Text: "two.mkv"}}
+	view = m.View()
+	if !strings.Contains(view, StyleCursor.Render("one.mkv")) {
+		t.Fatalf("completed cursor row must wear the cursor color:\n%s", view)
+	}
+	if strings.Contains(view, StyleCursor.Render("two.mkv")) {
+		t.Fatalf("a completed row without the cursor must stay plain:\n%s", view)
 	}
 }
 

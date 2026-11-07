@@ -2549,25 +2549,49 @@ func (m Model) viewDownloads() string {
 		if i == m.selected {
 			marker = StyleTabActive.Render("▸ ")
 		}
+		// The row under the cursor renders its neutral text in StyleCursor
+		// so it never matches the rows around it; status colors (starting
+		// blue, failed red, paused yellow) keep their color.
+		cursor := i == m.selected
 		switch r.Status {
 		case RowRunning:
-			b.WriteString(marker + renderRow(r, labelW, barW, m.width) + "\n")
+			b.WriteString(marker + renderRow(r, labelW, barW, m.width, cursor) + "\n")
 		case RowQueued:
 			// Held: the user has not asked for this file yet.
-			b.WriteString(marker + StyleDim.Render("· waiting for you  "+r.Label) + "\n")
+			style := StyleDim
+			if cursor {
+				style = StyleCursor
+			}
+			b.WriteString(marker + style.Render("· waiting for you  "+r.Label) + "\n")
 		case RowStarting:
 			// The app is on it: dispatched or waiting for a free slot
 			// while the transfer is set up.
 			b.WriteString(marker + StyleStarting.Render(spinnerFrame(m.spin)+" starting  "+r.Label) + "\n")
 		case RowSaved:
-			b.WriteString(marker + r.Detail + "\n")
+			// Plain by default; the cursor row alone gets the light gray.
+			detail := r.Detail
+			if cursor {
+				detail = StyleCursor.Render(r.Detail)
+			}
+			b.WriteString(marker + detail + "\n")
 		case RowFailed:
-			b.WriteString(marker + StyleErr.Render("✗ failed  "+r.Label) +
-				StyleDim.Render("  "+r.Detail) + "\n")
+			detail := StyleDim.Render("  " + r.Detail)
+			if cursor {
+				detail = StyleCursor.Render("  " + r.Detail)
+			}
+			b.WriteString(marker + StyleErr.Render("✗ failed  "+r.Label) + detail + "\n")
 		case RowPaused:
-			b.WriteString(marker + StyleWarn.Render("⏸ paused (space resumes)  ") + StyleDim.Render(r.Label) + "\n")
+			label := StyleDim.Render(r.Label)
+			if cursor {
+				label = StyleCursor.Render(r.Label)
+			}
+			b.WriteString(marker + StyleWarn.Render("⏸ paused (space resumes)  ") + label + "\n")
 		case RowCancelled:
-			b.WriteString(marker + StyleDim.Render("⊘ cancelled  "+r.Label) + "\n")
+			style := StyleDim
+			if cursor {
+				style = StyleCursor
+			}
+			b.WriteString(marker + style.Render("⊘ cancelled  "+r.Label) + "\n")
 		}
 	}
 	if end < len(vis) {
@@ -2623,10 +2647,15 @@ func (m Model) viewCompleted() string {
 	for pos := m.scrollCompleted; pos < end; pos++ {
 		i := vis[pos]
 		marker := "  "
-		if i == m.selCompleted {
+		cursor := i == m.selCompleted
+		if cursor {
 			marker = StyleTabActive.Render("▸ ")
 		}
-		b.WriteString(marker + truncateDisplay(m.opts.Completed[i].Text, m.contentWidth()-2) + "\n")
+		line := truncateDisplay(m.opts.Completed[i].Text, m.contentWidth()-2)
+		if cursor {
+			line = StyleCursor.Render(line)
+		}
+		b.WriteString(marker + line + "\n")
 	}
 	if end < len(vis) {
 		b.WriteString(StyleDim.Render(fmt.Sprintf("  ▼ %d more below", len(vis)-end)) + "\n")
