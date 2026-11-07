@@ -123,7 +123,7 @@ func NewScheduler(
 		byID:        map[int]*schedJob{},
 		work:        make(chan *schedJob, len(urls)+1),
 		results:     make(chan jobResult, len(urls)+1),
-		controls:    make(chan controlMsg, 16),
+		controls:    make(chan controlMsg, 64),
 		done:        make(chan struct{}),
 		stopped:     make(chan struct{}),
 		newRunner:   newRunner,
@@ -178,12 +178,15 @@ func (s *Scheduler) Start(ctx context.Context) <-chan struct{} {
 	return s.done
 }
 
-// Control posts a playback action for one job. Safe from any goroutine;
-// never blocks indefinitely (the board has already quit then).
+// Control posts a playback action for one job. Safe from any goroutine.
+// The send blocks until the controller takes it (newStop escapes when the
+// board is shutting down): a batch of N commands must never be lost just
+// because the buffer filled while the controller drained the last burst —
+// a quietly dropped ControlStart leaves a held row behind forever.
 func (s *Scheduler) Control(id int, action tui.ControlAction) {
 	select {
 	case s.controls <- controlMsg{id: id, action: action}:
-	default:
+	case <-s.stopped:
 	}
 }
 
@@ -208,21 +211,21 @@ func (s *Scheduler) Add(url string) (int, bool) {
 
 // Remove drops a job from the run (cancelling it if active). The queue file
 // is the caller's responsibility (the board removes the line via the
-// store). Used by the board's delete flow.
+// store). Blocks until taken, like Control, so a delete cannot vanish.
 func (s *Scheduler) Remove(id int) {
 	select {
 	case s.controls <- controlMsg{id: id, action: tui.ControlRemove}:
-	default:
+	case <-s.stopped:
 	}
 }
 
 // Reorder sets the priority order (the flow order in flowing mode) to the
 // given job ids; ids not listed keep their previous relative order after
-// the listed ones.
+// the listed ones. Blocks until taken, like Control.
 func (s *Scheduler) Reorder(ids []int) {
 	select {
 	case s.controls <- controlMsg{action: tui.ControlReorder, order: ids}:
-	default:
+	case <-s.stopped:
 	}
 }
 

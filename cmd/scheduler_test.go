@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -217,6 +218,46 @@ func TestSchedulerSingleStartDoesNotFlow(t *testing.T) {
 
 	rig.sched.Control(1, tui.ControlCancel)
 	waitFor(t, "run finished", func() bool { return closed(rig.done) })
+}
+
+// TestSchedulerControlBurstLosesNothing: pressing S on N marks fires N
+// ControlStarts back-to-back from the board's Update goroutine. The
+// overflowing tail must be delivered as the controller drains, never
+// dropped — a lost start leaves a held row behind with no trace.
+func TestSchedulerControlBurstLosesNothing(t *testing.T) {
+	const n = 40 // comfortably beyond the old control-slot count
+	urls := make([]string, n)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("https://x/file-%02d", i)
+	}
+	runner := newBlockRunner()
+	rig, _ := newSchedRig(t, urls, 2, runner)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	rig.done = rig.sched.Start(runCtx)
+
+	// The whole burst from one producer, exactly like the board's
+	// per-keypress loop: no acknowledgement, no pacing.
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		for i := 0; i < n; i++ {
+			rig.sched.Control(i, tui.ControlStart)
+		}
+	}()
+	select {
+	case <-sent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Control sends must not block indefinitely")
+	}
+
+	for i := 0; i < n; i++ {
+		id := i
+		waitFor(t, fmt.Sprintf("row %d starting", id), func() bool {
+			return rig.has(tui.RowStarting, id)
+		})
+	}
 }
 
 func TestSchedulerStartAllFlowsThroughQueue(t *testing.T) {
